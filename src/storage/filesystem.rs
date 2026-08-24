@@ -18,20 +18,27 @@ impl FilesystemStore {
         })
     }
 
-    fn path(&self, digest: &Digest) -> PathBuf {
-        self.root
+    fn path(&self, digest: &Digest) -> anyhow::Result<PathBuf> {
+        digest
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let algorithm = digest
+            .algorithm_kind()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        Ok(self
+            .root
             .join("blobs")
-            .join(&digest.algorithm)
+            .join(algorithm.as_str())
             .join(&digest.hash[..2])
             .join(&digest.hash)
-            .join(digest.size.to_string())
+            .join(digest.size.to_string()))
     }
 }
 
 #[async_trait]
 impl BlobStore for FilesystemStore {
     async fn size(&self, digest: &Digest) -> anyhow::Result<Option<u64>> {
-        match tokio::fs::metadata(self.path(digest)).await {
+        match tokio::fs::metadata(self.path(digest)?).await {
             Ok(metadata) => Ok(Some(metadata.len())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
@@ -39,7 +46,7 @@ impl BlobStore for FilesystemStore {
     }
 
     async fn get(&self, digest: &Digest) -> anyhow::Result<Option<Blob>> {
-        let file = match tokio::fs::File::open(self.path(digest)).await {
+        let file = match tokio::fs::File::open(self.path(digest)?).await {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -52,7 +59,7 @@ impl BlobStore for FilesystemStore {
     }
 
     async fn put(&self, digest: &Digest, source: &Path) -> anyhow::Result<PutOutcome> {
-        let destination = self.path(digest);
+        let destination = self.path(digest)?;
         if tokio::fs::try_exists(&destination).await? {
             return Ok(PutOutcome::AlreadyExists);
         }

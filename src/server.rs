@@ -30,14 +30,12 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-#[cfg(test)]
-use crate::model::Algorithm;
 use crate::{
     auth::{Access, Authorizer},
     metadata::{CommitOutcome, ManifestCommitOutcome, MetadataStore},
     metrics::Metrics,
     model::{
-        ActionResult, Digest, Directory, RustcAction, RustcMetadata, TaskAction,
+        ActionResult, Algorithm, Digest, Directory, RustcAction, RustcMetadata, TaskAction,
         TaskActionManifest, TaskMetadata,
     },
     storage::{BlobStore, PutOutcome},
@@ -233,22 +231,20 @@ async fn put_blob(
                 "blob exceeds declared or configured size",
             ));
         }
-        match digest.algorithm.as_str() {
-            "blake3" => {
+        match digest.algorithm_kind().map_err(ApiError::bad_request)? {
+            Algorithm::Blake3 => {
                 blake3.update(&chunk);
             }
-            "sha256" => {
+            Algorithm::Sha256 => {
                 sha256.update(&chunk);
             }
-            _ => unreachable!("digest algorithm was validated"),
         }
         file.write_all(&chunk).await.map_err(ApiError::internal)?;
     }
     file.flush().await.map_err(ApiError::internal)?;
-    let actual_hash = match digest.algorithm.as_str() {
-        "blake3" => blake3.finalize().to_hex().to_string(),
-        "sha256" => hex::encode(sha256.finalize()),
-        _ => unreachable!("digest algorithm was validated"),
+    let actual_hash = match digest.algorithm_kind().map_err(ApiError::bad_request)? {
+        Algorithm::Blake3 => blake3.finalize().to_hex().to_string(),
+        Algorithm::Sha256 => hex::encode(sha256.finalize()),
     };
     if size != digest.size || actual_hash != digest.hash {
         return Err(ApiError::bad_request(
@@ -488,11 +484,12 @@ fn pack_blob_header(digest: &Digest) -> Result<Bytes, ApiError> {
         return Err(ApiError::bad_request("invalid digest hash length"));
     }
     let mut header = Vec::with_capacity(BLOB_PACK_HEADER_BYTES);
-    header.push(match digest.algorithm.as_str() {
-        "blake3" => 1,
-        "sha256" => 2,
-        _ => unreachable!("digest algorithm was validated"),
-    });
+    header.push(
+        match digest.algorithm_kind().map_err(ApiError::bad_request)? {
+            Algorithm::Blake3 => 1,
+            Algorithm::Sha256 => 2,
+        },
+    );
     header.extend_from_slice(&hash);
     header.extend_from_slice(&digest.size.to_be_bytes());
     Ok(Bytes::from(header))

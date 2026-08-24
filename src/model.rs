@@ -1,7 +1,6 @@
 #[cfg(test)]
-pub use mbx_cache_protocol::{
-    ActionPrediction as TaskActionPrediction, DigestAlgorithm as Algorithm,
-};
+pub use mbx_cache_protocol::ActionPrediction as TaskActionPrediction;
+pub use mbx_cache_protocol::DigestAlgorithm as Algorithm;
 pub use mbx_cache_protocol::{ActionResult, Digest, Directory, RustcMetadata, TaskActionManifest};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
@@ -280,5 +279,11 @@ mod tests {
             ..valid
         };
         assert!(invalid.validate().is_err());
+        let unknown = Digest {
+            algorithm: "..".into(),
+            hash: "a".repeat(64),
+            size: 42,
+        };
+        assert!(unknown.validate().is_err());
     }
 }
