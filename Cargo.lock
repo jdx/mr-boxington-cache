@@ -1876,7 +1876,7 @@ dependencies = [
 [[package]]
 name = "mbx-cache-protocol"
 version = "0.3.0"
-source = "git+https://github.com/jdx/mr-boxington?rev=dc607f8294b286dfc63ec70d5f2868f50b095ff6#dc607f8294b286dfc63ec70d5f2868f50b095ff6"
+source = "git+https://github.com/jdx/mr-boxington?rev=c70a5fed660482adcf7f144b025ed74ae896b5eb#c70a5fed660482adcf7f144b025ed74ae896b5eb"
 dependencies = [
  "blake3",
  "eyre",
