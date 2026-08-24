@@ -21,7 +21,7 @@ impl FilesystemStore {
     fn path(&self, digest: &Digest) -> PathBuf {
         self.root
             .join("blobs")
-            .join(digest.algorithm.to_string())
+            .join(&digest.algorithm)
             .join(&digest.hash[..2])
             .join(&digest.hash)
             .join(digest.size.to_string())

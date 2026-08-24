@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(protocol)* compile server records, capabilities, and blob-pack framing from
+  the shared `mbx-cache-protocol` crate
+
 ## [0.2.0](https://github.com/jdx/mbx-cache/compare/v0.0.0...v0.2.0) - 2026-08-22
 
 ### Added
