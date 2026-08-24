@@ -32,7 +32,7 @@ futures-util = "0.3"
 hex = "0.4"
 http = "1"
 jsonwebtoken = "9"
-mbx-cache-protocol = { git = "https://github.com/jdx/mr-boxington", rev = "54a3b6f4ba0c873bd4286ff70f53107542c02759" }
+mbx-cache-protocol = { git = "https://github.com/jdx/mr-boxington", rev = "dc607f8294b286dfc63ec70d5f2868f50b095ff6" }
 prometheus-client = "0.25"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
