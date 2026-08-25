@@ -1875,8 +1875,9 @@ dependencies = [
 
 [[package]]
 name = "mbx-cache-protocol"
-version = "0.3.0"
-source = "git+https://github.com/jdx/mr-boxington?rev=c70a5fed660482adcf7f144b025ed74ae896b5eb#c70a5fed660482adcf7f144b025ed74ae896b5eb"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f816daaa293ad331d666874e102003bc2abca0795c94dee993b94ad58c7b9af"
 dependencies = [
  "blake3",
  "eyre",
