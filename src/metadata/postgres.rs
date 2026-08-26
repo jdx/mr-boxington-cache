@@ -327,7 +327,7 @@ mod tests {
 
     fn test_digest(fill: &str, size: u64) -> Digest {
         Digest {
-            algorithm: Algorithm::Blake3,
+            algorithm: Algorithm::Blake3.into(),
             hash: fill.repeat(64),
             size,
         }
@@ -383,12 +383,12 @@ mod tests {
     #[test]
     fn unrepresentable_blob_sizes_are_not_queried() {
         let representable = Digest {
-            algorithm: Algorithm::Blake3,
+            algorithm: Algorithm::Blake3.into(),
             hash: "0".repeat(64),
             size: i64::MAX as u64,
         };
         let unrepresentable = Digest {
-            algorithm: Algorithm::Blake3,
+            algorithm: Algorithm::Blake3.into(),
             hash: "1".repeat(64),
             size: i64::MAX as u64 + 1,
         };

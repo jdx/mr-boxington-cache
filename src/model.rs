@@ -1,139 +1,9 @@
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashSet},
-    fmt,
-};
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Digest {
-    pub algorithm: Algorithm,
-    pub hash: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Algorithm {
-    Blake3,
-    Sha256,
-}
-
-impl fmt::Display for Algorithm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Blake3 => "blake3",
-            Self::Sha256 => "sha256",
-        })
-    }
-}
-
-impl std::str::FromStr for Algorithm {
-    type Err = &'static str;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "blake3" => Ok(Self::Blake3),
-            "sha256" => Ok(Self::Sha256),
-            _ => Err("unsupported digest algorithm"),
-        }
-    }
-}
-
-impl Digest {
-    pub fn validate(&self) -> bool {
-        self.hash.len() == 64
-            && self
-                .hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    }
-
-    pub fn key(&self) -> String {
-        format!("{}/{}/{}", self.algorithm, self.hash, self.size)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskActionManifest {
-    pub predictions: Vec<TaskActionPrediction>,
-    pub task: String,
-    pub version: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskActionPrediction {
-    pub action: Digest,
-    pub adapter: String,
-    pub invocation: Digest,
-    pub payload: String,
-}
-
-#[derive(Serialize)]
-struct TaskActionManifestSelector<'a> {
-    kind: &'static str,
-    task: &'a str,
-    version: u8,
-}
-
-impl TaskActionManifest {
-    pub fn validate(&self) -> bool {
-        let mut invocations = HashSet::new();
-        self.version == 1
-            && valid_task_identity(&self.task)
-            && self.predictions.len() <= 16 * 1024
-            && self.predictions.iter().all(|prediction| {
-                prediction.validate() && invocations.insert(&prediction.invocation)
-            })
-    }
-
-    pub fn selector_digest(&self) -> Digest {
-        let selector = serde_json::to_vec(&TaskActionManifestSelector {
-            kind: "task_action_manifest",
-            task: &self.task,
-            version: 1,
-        })
-        .expect("manifest selector must serialize");
-        Digest {
-            algorithm: Algorithm::Blake3,
-            hash: blake3::hash(&selector).to_hex().to_string(),
-            size: selector.len() as u64,
-        }
-    }
-}
-
-impl TaskActionPrediction {
-    fn validate(&self) -> bool {
-        self.action.algorithm == Algorithm::Blake3
-            && self.action.validate()
-            && self.invocation.algorithm == Algorithm::Blake3
-            && self.invocation.validate()
-            && !self.adapter.is_empty()
-            && self
-                .adapter
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            && self.payload.len() <= 256 * 1024
-            && serde_json::from_str::<serde_json::Value>(&self.payload).is_ok()
-    }
-}
-
-fn valid_task_identity(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActionResult {
-    pub action: Digest,
-    pub metadata: Option<Digest>,
-    pub output_root: Option<Digest>,
-    pub version: u8,
-}
+#[cfg(test)]
+pub use mbx_cache_protocol::ActionPrediction as TaskActionPrediction;
+pub use mbx_cache_protocol::DigestAlgorithm as Algorithm;
+pub use mbx_cache_protocol::{ActionResult, Digest, Directory, RustcMetadata, TaskActionManifest};
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,15 +123,6 @@ pub struct RustcInput {
     pub digest: Digest,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RustcMetadata {
-    pub version: u8,
-    pub kind: String,
-    pub stdout: Digest,
-    pub stderr: Digest,
-}
-
 fn valid_string(value: &str) -> bool {
     !value.contains('\0')
 }
@@ -373,16 +234,7 @@ impl RustcCompiler {
 
 impl RustcInput {
     fn validate(&self) -> bool {
-        valid_normalized_path(&self.path) && self.digest.validate()
-    }
-}
-
-impl RustcMetadata {
-    pub fn validate(&self) -> bool {
-        self.version == 1
-            && self.kind == "rustc"
-            && self.stdout.validate()
-            && self.stderr.validate()
+        valid_normalized_path(&self.path) && self.digest.validate().is_ok()
     }
 }
 
@@ -410,40 +262,6 @@ fn valid_normalized_path(path: &str) -> bool {
         })
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Directory {
-    pub directories: Vec<DirectoryNode>,
-    pub files: Vec<FileNode>,
-    pub symlinks: Vec<SymlinkNode>,
-    pub version: u8,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DirectoryNode {
-    pub digest: Digest,
-    pub mode: u32,
-    pub name: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FileNode {
-    pub digest: Digest,
-    pub executable: bool,
-    pub mode: u32,
-    pub name: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SymlinkNode {
-    pub mode: u32,
-    pub name: String,
-    pub target: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,15 +269,21 @@ mod tests {
     #[test]
     fn validates_lowercase_hex_digests() {
         let valid = Digest {
-            algorithm: Algorithm::Blake3,
+            algorithm: Algorithm::Blake3.into(),
             hash: "a".repeat(64),
             size: 42,
         };
-        assert!(valid.validate());
+        assert!(valid.validate().is_ok());
         let invalid = Digest {
             hash: "A".repeat(64),
             ..valid
         };
-        assert!(!invalid.validate());
+        assert!(invalid.validate().is_err());
+        let unknown = Digest {
+            algorithm: "..".into(),
+            hash: "a".repeat(64),
+            size: 42,
+        };
+        assert!(unknown.validate().is_err());
     }
 }

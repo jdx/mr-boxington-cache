@@ -7,9 +7,20 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
+use mbx_cache_protocol::{
+    ActionKindCapability, BLOB_PACK_BLOBS_HEADER as PACK_BLOBS_HEADER,
+    BLOB_PACK_BYTES_HEADER as PACK_BYTES_HEADER, BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE,
+    Capabilities, CapabilityFeatures, CapabilityLimits, CapabilityProtocol, MAX_BATCH_ITEMS,
+    PROTOCOL_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
-use std::{collections::HashSet, io, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io,
+    sync::Arc,
+    time::Instant,
+};
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
 use tower_http::{
@@ -30,12 +41,7 @@ use crate::{
     storage::{BlobStore, PutOutcome},
 };
 
-const BLOB_PACK_MEDIA_TYPE: &str = "application/vnd.mbx.cache-blob-pack.v1";
-const BLOB_PACK_MAGIC: &[u8; 8] = b"MBXPACK1";
-const BLOB_PACK_HEADER_BYTES: usize = 1 + 32 + 8;
-const PACK_BLOBS_HEADER: &str = "mbx-cache-pack-blobs";
-const PACK_BYTES_HEADER: &str = "mbx-cache-pack-bytes";
-const MAX_BATCH_ITEMS: usize = 10_000;
+const BLOB_PACK_HEADER_BYTES: usize = mbx_cache_protocol::BLOB_PACK_HEADER_BYTES as usize;
 const MAX_PACK_STORAGE_READS: usize = 16;
 
 #[derive(Clone)]
@@ -118,21 +124,47 @@ async fn record_blob_access(state: &AppState, namespace: &str, digests: &[Digest
 }
 
 async fn status() -> impl IntoResponse {
-    Json(serde_json::json!({"status":"ok","protocol":1}))
+    Json(serde_json::json!({"status":"ok","protocol":PROTOCOL_VERSION}))
 }
 
 async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
-    Json(serde_json::json!({
-        "protocol":{"major":1,"minor":0},
-        "digest_algorithms":["blake3","sha256"],
-        "compressors":["identity","zstd"],
-        "action_kinds":{
-            "rustc":{"action_schema":1,"metadata_schema":1},
-            "task":{"action_schema":1,"metadata_schema":1}
+    Json(Capabilities {
+        protocol: CapabilityProtocol {
+            major: PROTOCOL_VERSION,
+            minor: 0,
         },
-        "features":{"action_manifests":true,"batch":true,"blob_packs":true,"resumable_uploads":false,"delegated_transfers":false},
-        "limits":{"max_batch_items":MAX_BATCH_ITEMS,"max_inline_blob_bytes":1048576,"max_blob_bytes":state.max_blob_bytes,"max_pack_bytes":state.max_blob_bytes}
-    }))
+        digest_algorithms: vec!["blake3".into(), "sha256".into()],
+        compressors: vec!["identity".into(), "zstd".into()],
+        action_kinds: BTreeMap::from([
+            (
+                "rustc".into(),
+                ActionKindCapability {
+                    action_schema: 1,
+                    metadata_schema: 1,
+                },
+            ),
+            (
+                "task".into(),
+                ActionKindCapability {
+                    action_schema: 1,
+                    metadata_schema: 1,
+                },
+            ),
+        ]),
+        features: CapabilityFeatures {
+            action_manifests: true,
+            batch: true,
+            blob_packs: true,
+            resumable_uploads: false,
+            delegated_transfers: false,
+        },
+        limits: CapabilityLimits {
+            max_batch_items: MAX_BATCH_ITEMS as u64,
+            max_inline_blob_bytes: 1_048_576,
+            max_blob_bytes: state.max_blob_bytes,
+            max_pack_bytes: state.max_blob_bytes,
+        },
+    })
 }
 
 async fn get_blob(
@@ -199,7 +231,7 @@ async fn put_blob(
                 "blob exceeds declared or configured size",
             ));
         }
-        match digest.algorithm {
+        match digest.algorithm_kind().map_err(ApiError::bad_request)? {
             Algorithm::Blake3 => {
                 blake3.update(&chunk);
             }
@@ -210,7 +242,7 @@ async fn put_blob(
         file.write_all(&chunk).await.map_err(ApiError::internal)?;
     }
     file.flush().await.map_err(ApiError::internal)?;
-    let actual_hash = match digest.algorithm {
+    let actual_hash = match digest.algorithm_kind().map_err(ApiError::bad_request)? {
         Algorithm::Blake3 => blake3.finalize().to_hex().to_string(),
         Algorithm::Sha256 => hex::encode(sha256.finalize()),
     };
@@ -452,10 +484,12 @@ fn pack_blob_header(digest: &Digest) -> Result<Bytes, ApiError> {
         return Err(ApiError::bad_request("invalid digest hash length"));
     }
     let mut header = Vec::with_capacity(BLOB_PACK_HEADER_BYTES);
-    header.push(match digest.algorithm {
-        Algorithm::Blake3 => 1,
-        Algorithm::Sha256 => 2,
-    });
+    header.push(
+        match digest.algorithm_kind().map_err(ApiError::bad_request)? {
+            Algorithm::Blake3 => 1,
+            Algorithm::Sha256 => 2,
+        },
+    );
     header.extend_from_slice(&hash);
     header.extend_from_slice(&digest.size.to_be_bytes());
     Ok(Bytes::from(header))
@@ -934,7 +968,6 @@ async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
 }
 
 fn parse_digest((algorithm, hash, size): (String, String, u64)) -> Result<Digest, ApiError> {
-    let algorithm = algorithm.parse().map_err(ApiError::bad_request)?;
     let digest = Digest {
         algorithm,
         hash,
@@ -946,14 +979,14 @@ fn parse_digest((algorithm, hash, size): (String, String, u64)) -> Result<Digest
 
 fn parse_action_digest(parts: (String, String, u64)) -> Result<Digest, ApiError> {
     let digest = parse_digest(parts)?;
-    if digest.algorithm != Algorithm::Blake3 {
+    if digest.algorithm != "blake3" {
         return Err(ApiError::bad_request("action result keys must use blake3"));
     }
     Ok(digest)
 }
 
 fn validate_digest(digest: &Digest) -> Result<(), ApiError> {
-    if digest.validate() {
+    if digest.validate().is_ok() {
         Ok(())
     } else {
         Err(ApiError::bad_request("invalid digest"))
@@ -1102,7 +1135,7 @@ mod tests {
 
     fn digest(bytes: &[u8]) -> Digest {
         Digest {
-            algorithm: Algorithm::Blake3,
+            algorithm: Algorithm::Blake3.into(),
             hash: blake3::hash(bytes).to_hex().to_string(),
             size: bytes.len() as u64,
         }
@@ -1110,7 +1143,7 @@ mod tests {
 
     fn blob_path(root: &std::path::Path, digest: &Digest) -> std::path::PathBuf {
         root.join("blobs")
-            .join(digest.algorithm.to_string())
+            .join(&digest.algorithm)
             .join(&digest.hash[..2])
             .join(&digest.hash)
             .join(digest.size.to_string())
@@ -1138,7 +1171,7 @@ mod tests {
             assert!(end <= bytes.len());
             entries.push((
                 Digest {
-                    algorithm,
+                    algorithm: algorithm.into(),
                     hash,
                     size,
                 },
@@ -1664,7 +1697,7 @@ mod tests {
     async fn rejects_blob_packs_over_the_configured_limit() {
         let (app, _directory) = test_app().await;
         let oversized = Digest {
-            algorithm: Algorithm::Blake3,
+            algorithm: Algorithm::Blake3.into(),
             hash: "0".repeat(64),
             size: 1024 * 1024 + 1,
         };
@@ -2054,7 +2087,7 @@ mod tests {
         let result_uri = format!("/v1/action-results/sha256/{hash}/{}", action.len());
         let body = serde_json::to_vec(&ActionResult {
             action: Digest {
-                algorithm: Algorithm::Sha256,
+                algorithm: Algorithm::Sha256.into(),
                 hash,
                 size: action.len() as u64,
             },
