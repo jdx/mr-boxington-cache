@@ -120,6 +120,17 @@ OIDC lets CI systems use short-lived identity tokens instead of stored cache sec
           "repository_owner_id": "216188"
         },
         "read": ["jdx/mise"],
+        "write": []
+      },
+      {
+        "claims": {
+          "repository": "jdx/mise",
+          "repository_owner_id": "216188",
+          "event_name": "push",
+          "ref_type": "branch",
+          "ref": "refs/heads/main"
+        },
+        "read": ["jdx/mise"],
         "write": ["jdx/mise"]
       }
     ]
@@ -127,9 +138,9 @@ OIDC lets CI systems use short-lived identity tokens instead of stored cache sec
 ]
 ```
 
-The server discovers the issuer's JWKS endpoint, verifies the signature, issuer, audience, expiry, not-before time, and subject, then applies the first matching authorization rule. Rules are alternatives; every claim within a rule must match exactly. A configured claim may be an array of accepted scalar values, and a token claim may itself be an array. Namespace grants use the same exact, `*`, and `prefix/*` forms as static tokens.
+The server discovers the issuer's JWKS endpoint, verifies the signature, issuer, audience, expiry, not-before time, and subject, then checks the matching authorization rules. Rules are alternatives; every claim within a rule must match exactly. A configured claim may be an array of accepted scalar values, and a token claim may itself be an array. Namespace grants use the same exact, `*`, and `prefix/*` forms as static tokens.
 
-Authorization is deny-by-default: every provider needs at least one audience and rule, and every rule must constrain at least one claim. Pin stable identity claims such as GitHub's numeric `repository_owner_id` alongside the repository name; add `ref`, `environment`, or other claims when only a narrower workflow identity should be able to write. Symmetric JWT algorithms are never accepted.
+Authorization is deny-by-default: every provider needs at least one audience and rule, and every rule must constrain at least one claim. Pin stable identity claims such as GitHub's numeric `repository_owner_id` alongside the repository name. GitHub Actions write rules should also require `event_name: "push"`, `ref_type: "branch"`, and an exact protected-branch `ref`; checking `ref` alone is unsafe because events such as `pull_request_target` use the base branch ref. Add `workflow_ref`, `job_workflow_ref`, or `environment` when only a narrower workflow identity should be able to write. Symmetric JWT algorithms are never accepted.
 
 Optional provider settings are:
 
