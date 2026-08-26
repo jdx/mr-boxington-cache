@@ -8,6 +8,10 @@ commits, namespace isolation, typed action schemas, and streaming transfers.
 
 > This project is experimental and is not intended for others to use yet.
 
+User documentation lives at
+[mr-boxington.jdx.dev/cache-server](https://mr-boxington.jdx.dev/cache-server);
+this README carries the implementation and operations detail beyond it.
+
 ## Features
 
 - BLAKE3 and SHA-256 content-addressed storage
