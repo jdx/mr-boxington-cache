@@ -1,0 +1,16 @@
+# Advisory policy for the scheduled `cargo deny check advisories` run in
+# .github/workflows/advisories.yml. Licenses, bans, and sources are
+# deliberately not configured here: nothing runs those checks, and a policy
+# nobody enforces is worse than no policy.
+
+[advisories]
+yanked = "deny"
+ignore = [
+  # Marvin Attack: timing sidechannel in `rsa`. Reachable only from the
+  # `rsa` dev-dependency, which signs RSA keys for the OIDC test fixtures --
+  # it is not in the shipped server. Upstream has no patched release ("No
+  # safe upgrade is available"), so there is nothing to upgrade to and the
+  # alternative is dropping RSA coverage from the tests. Revisit when
+  # RustCrypto/RSA#626 lands a constant-time implementation.
+  "RUSTSEC-2023-0071",
+]
