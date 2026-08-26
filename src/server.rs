@@ -638,16 +638,30 @@ async fn require_blob(
 }
 
 async fn validate_tree(state: &AppState, namespace: &str, root: &Digest) -> Result<(), ApiError> {
-    let mut pending = vec![(root.clone(), HashSet::new())];
+    enum Visit {
+        Enter(Digest),
+        Exit(Digest),
+    }
+
+    let mut pending = vec![Visit::Enter(root.clone())];
+    let mut visiting = HashSet::new();
     let mut seen = HashSet::new();
-    while let Some((digest, mut ancestors)) = pending.pop() {
-        if !ancestors.insert(digest.clone()) {
-            return Err(ApiError::unprocessable("directory graph contains a cycle"));
-        }
-        if !seen.insert(digest.clone()) {
+    while let Some(visit) = pending.pop() {
+        let digest = match visit {
+            Visit::Exit(digest) => {
+                visiting.remove(&digest);
+                seen.insert(digest);
+                continue;
+            }
+            Visit::Enter(digest) => digest,
+        };
+        if seen.contains(&digest) {
             continue;
         }
-        if seen.len() > 100_000 {
+        if !visiting.insert(digest.clone()) {
+            return Err(ApiError::unprocessable("directory graph contains a cycle"));
+        }
+        if seen.len() + visiting.len() > 100_000 {
             return Err(ApiError::unprocessable("directory graph is too large"));
         }
         if digest.size > 16 * 1024 * 1024 {
@@ -687,11 +701,12 @@ async fn validate_tree(state: &AppState, namespace: &str, root: &Digest) -> Resu
         for file in directory.files {
             require_blob(state, namespace, &file.digest, "file blob").await?;
         }
+        pending.push(Visit::Exit(digest));
         pending.extend(
             directory
                 .directories
                 .into_iter()
-                .map(|node| (node.digest, ancestors.clone())),
+                .map(|node| Visit::Enter(node.digest)),
         );
     }
     Ok(())

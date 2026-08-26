@@ -77,6 +77,8 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
     ($rules | any(
       .claims.repository == $repository and
       .claims.repository_owner_id == "216188" and
+      .claims.event_name == "push" and
+      .claims.ref_type == "branch" and
       .claims.ref == "refs/heads/main" and
       .read == [$repository] and
       .write == [$repository]
