@@ -180,7 +180,7 @@ GitHub OIDC is configured with these server-enforced grants:
 - tag workflows for listed repositories: read-only;
 - pull-request workflows for listed repositories: read-only;
 - other push workflows for listed repositories: read-only; and
-- the exact `jdx/mbx-cache` production deployment workflow: read/write for
+- the exact `jdx/mr-boxington-cache` production deployment workflow: read/write for
   its isolated qualification namespace.
 
 Each trusted repository is paired with GitHub's stable numeric
@@ -280,8 +280,8 @@ resource first.
 | `mise-cache.json`, `mise-cache.yml` | Grafana provisioning on the host | Both files would be mounted, so Grafana would show the dashboard twice |
 
 One identifier could not be preserved: GitHub's OIDC subject embeds the
-repository, so the tokens this workflow presents now say `jdx/mbx-cache`. Any
-external trust that was pinned to `jdx/mise-cache` has to be updated on that
+repository, so the tokens this workflow presents now say `jdx/mr-boxington-cache`. Any
+external trust that was pinned to an earlier repository name has to be updated on that
 side — including the Tailscale trust credential used to join the tailnet, which
 is what fails if the tailnet step reports `failed to exchange JWT for access
 token`.

@@ -30,7 +30,8 @@ permissions: {}
 jobs:
   prepare:
     name: Prepare container image
-    if: github.repository == 'jdx/mbx-cache'
+    # The numeric repository ID survives renames, unlike github.repository.
+    if: github.repository_id == '1320413482'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
