@@ -10,7 +10,8 @@ permissions: {}
 jobs:
   release:
     name: Release
-    if: github.repository == 'jdx/mbx-cache'
+    # The numeric repository ID survives renames, unlike github.repository.
+    if: github.repository_id == '1320413482'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -187,7 +188,7 @@ jobs:
 
       - name: Deploy immutable image
         env:
-          MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF: jdx/mbx-cache/.github/workflows/release-plz.yml@refs/heads/main
+          MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF: jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main
           MBX_CACHE_IMAGE: ${{ format('ghcr.io/jdx/mbx-cache@{0}', needs.image.outputs.digest) }}
           OVH_SSH_HOST: mise-cache-prod.tail13c301.ts.net
         run: |
@@ -198,7 +199,7 @@ jobs:
 
       - name: Qualify OIDC, PostgreSQL, and R2
         env:
-          CACHE_NAMESPACE: jdx/mbx-cache
+          CACHE_NAMESPACE: jdx/mr-boxington-cache
         run: |
           response=$(curl --fail --silent --show-error \
             --get \
@@ -249,7 +250,7 @@ jobs:
   release-pr:
     name: Release PR
     needs: release
-    if: github.repository == 'jdx/mbx-cache'
+    if: github.repository_id == '1320413482'
     runs-on: ubuntu-latest
     permissions:
       contents: write

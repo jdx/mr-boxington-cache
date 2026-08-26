@@ -104,12 +104,12 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
     ))
   )) and
   ($rules | any(
-    .claims.repository == "jdx/mbx-cache" and
+    .claims.repository == "jdx/mr-boxington-cache" and
     .claims.repository_owner_id == "216188" and
     .claims.environment == "production" and
-    .claims.workflow_ref == "jdx/mbx-cache/.github/workflows/release-plz.yml@refs/heads/main" and
-    .read == ["jdx/mbx-cache"] and
-    .write == ["jdx/mbx-cache"]
+    .claims.workflow_ref == "jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main" and
+    .read == ["jdx/mr-boxington-cache"] and
+    .write == ["jdx/mr-boxington-cache"]
   ))
 ' <<<"$oidc_json" >/dev/null
 grep -Fq 'port = 2222' "$project_dir/mise.local.toml"

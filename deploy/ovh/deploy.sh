@@ -57,9 +57,9 @@ if [[ $OVH_SSH_SOURCE_CIDR =~ [[:space:]] ]]; then
 fi
 
 trusted_repositories_file=${MBX_CACHE_GITHUB_REPOSITORIES_FILE:-$script_dir/trusted-repositories.json}
-deployment_repository=${MBX_CACHE_DEPLOY_GITHUB_REPOSITORY:-jdx/mbx-cache}
+deployment_repository=${MBX_CACHE_DEPLOY_GITHUB_REPOSITORY:-jdx/mr-boxington-cache}
 deployment_owner_id=${MBX_CACHE_DEPLOY_GITHUB_OWNER_ID:-216188}
-deployment_workflow_ref=${MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF:-jdx/mbx-cache/.github/workflows/release-plz.yml@refs/heads/main}
+deployment_workflow_ref=${MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF:-jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main}
 ssh_user=${OVH_SSH_USER:-ubuntu}
 ssh_port=${OVH_SSH_PORT:-22}
 

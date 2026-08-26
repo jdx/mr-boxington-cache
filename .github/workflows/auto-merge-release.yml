@@ -13,7 +13,8 @@ concurrency:
 
 jobs:
   merge:
-    if: github.repository == 'jdx/mbx-cache'
+    # The numeric repository ID survives renames, unlike github.repository.
+    if: github.repository_id == '1320413482'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,7 +56,7 @@ jobs:
           fi
 
           pr_number=$(gh pr list \
-            --repo jdx/mbx-cache \
+            --repo jdx/mr-boxington-cache \
             --base main \
             --state open \
             --limit 100 \
@@ -66,11 +67,11 @@ jobs:
             exit 0
           fi
 
-          body=$(gh pr view "$pr_number" --repo jdx/mbx-cache --json body --jq '.body // ""')
+          body=$(gh pr view "$pr_number" --repo jdx/mr-boxington-cache --json body --jq '.body // ""')
           if [ -z "$(tr -d '[:space:]' <<<"$body")" ]; then
             echo "Release PR #${pr_number} has an empty body; retrying later"
             exit 0
           fi
 
           echo "Release PR #${pr_number} is ready for the release window"
-          gh pr merge "$pr_number" --repo jdx/mbx-cache --squash --auto
+          gh pr merge "$pr_number" --repo jdx/mr-boxington-cache --squash --auto
