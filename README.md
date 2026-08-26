@@ -1,6 +1,10 @@
 # mbx-cache
 
-`mbx-cache` is the self-hostable remote build-cache server for [mbx](https://github.com/jdx/mr-boxington). It implements version 1 of the mbx action-cache protocol with immutable blobs, atomic action-result commits, namespace isolation, typed action schemas, and streaming transfers.
+`mbx-cache` is the self-hostable remote build-cache server for
+[mbx](https://github.com/jdx/mr-boxington) and for
+[mise](https://github.com/jdx/mise)'s task cache. It implements version 1 of
+the mbx action-cache protocol with immutable blobs, atomic action-result
+commits, namespace isolation, typed action schemas, and streaming transfers.
 
 > This project is experimental and is not intended for others to use yet.
 
@@ -18,13 +22,8 @@
 
 ## Quick start
 
-Install the service from crates.io:
-
-```sh
-cargo install mbx-cache
-```
-
-The development stack starts the service, PostgreSQL, and MinIO:
+The development stack in this repository starts the service, PostgreSQL, and
+MinIO:
 
 ```sh
 docker compose up --build
@@ -32,16 +31,38 @@ docker compose up --build
 
 It listens on `http://localhost:8080`. The included token is `development-token` and permits the `default` namespace. Change it before exposing the service.
 
-For a local filesystem-backed instance:
+For a standalone instance, install the binary from crates.io and run it with
+filesystem storage:
 
 ```sh
-cargo run -- \
+cargo install mbx-cache
+mbx-cache \
   --allow-anonymous \
   --data-dir ./data \
   --listen 127.0.0.1:8080
 ```
 
 Anonymous access is intended only for a trusted local network. Production installations should terminate TLS at an ingress or proxy and configure tokens.
+
+## Connect a client
+
+Point mbx at the server with a namespace, which is required and isolates one
+project's cache from another:
+
+```toml
+# <config directory>/mbx/config.toml
+[remote]
+url = "https://cache.example.com"
+namespace = "acme/backend"
+mode = "read-write"
+```
+
+Authenticate with `MBX_REMOTE_TOKEN` (or `MBX_REMOTE_TOKEN_FILE`), or on CI
+with `MBX_REMOTE_OIDC_AUDIENCE` — mbx acquires the OIDC token itself. The
+client keeps pull requests read-only and disables the remote for tag builds
+regardless of the configured mode; see the
+[remote cache documentation](https://mr-boxington.jdx.dev/remote-cache) and
+[GitHub Actions setup](https://mr-boxington.jdx.dev/github-actions).
 
 ## Configuration
 
@@ -120,7 +141,9 @@ The service makes three bounded attempts to fetch provider metadata and keys at 
 
 ### GitHub Actions OIDC
 
-Until mise can acquire the job identity token itself, a workflow can request it from GitHub and pass it through the existing cache-token environment variable:
+mbx acquires the job identity token itself.
+[`jdx/mr-boxington-action`](https://github.com/jdx/mr-boxington-action)
+configures everything in one step:
 
 ```yaml
 permissions:
@@ -128,7 +151,27 @@ permissions:
   id-token: write
 
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@v7
+  - uses: jdx/mr-boxington-action@v1
+    with:
+      backend: server
+      server-url: https://cache.example.com
+      namespace: acme/backend
+      oidc-audience: https://cache.example.com
+  - run: mbx test --workspace
+```
+
+mise's task cache does not yet acquire the token itself; request it from
+GitHub in the workflow and pass it through the cache-token environment
+variable:
+
+```yaml
+permissions:
+  contents: read
+  id-token: write
+
+steps:
+  - uses: actions/checkout@v7
   - name: acquire cache identity
     id: cache-identity
     env:
@@ -207,8 +250,6 @@ The OpenMetrics endpoint exposes the existing action and blob counters plus deta
 
 These metrics intentionally use only fixed, low-cardinality labels. Namespaces, repositories, tokens, OIDC claims, and content digests are never exposed as metric labels. Pack duration includes client backpressure through completion of the response body; time to first byte and blob-store response-header latency separate request setup from streaming time.
 
-Expire objects with the bucket's lifecycle rule and sweep the metadata behind it, as described under Bounding storage above. A registered blob is not assumed to be present: a client that cannot fetch one treats the action as a miss and compiles, so an object expiring ahead of its row costs a recompile rather than a failure.
-
 Back up PostgreSQL and enable S3 versioning or replication as required. The service never exposes a deletion endpoint, so retention and disaster recovery remain administrative concerns.
 
 ## Development
@@ -231,9 +272,6 @@ Migrations run automatically, each test uses a namespace of its own, so one
 database serves the whole suite. CI always provides this, and the tests fail
 rather than skip when `CI` is set without a database, so the backend cannot
 quietly go uncovered.
-
-The client that speaks this protocol lives in
-[jdx/mr-boxington](https://github.com/jdx/mr-boxington).
 
 ## License
 
