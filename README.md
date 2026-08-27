@@ -222,7 +222,9 @@ All cache requests send `Mbx-Cache-Namespace` and, unless anonymous access is en
 - `GET|PUT /v1/blobs/{algorithm}/{hash}/{size}`
 - `POST /v1/blobs:missing`
 - `POST /v1/blobs:pack`
+- `POST /v1/blobs:pack-upload`
 - `GET|PUT /v1/action-results/{algorithm}/{hash}/{size}`
+- `POST /v1/action-results:batch`
 - `GET|PUT /v1/action-manifests/{algorithm}/{hash}/{size}`
 - `GET /metrics`
 
@@ -231,6 +233,10 @@ Blobs and action results are immutable. Repeating an identical write is idempote
 Task action manifests are mutable discovery indexes for fresh workers. Their stable key is the BLAKE3 digest of the canonical task-manifest selector. Writes use optimistic concurrency: create with `If-None-Match: *`, or update the ETag returned by `GET` with `If-Match`. A stale update returns `412 Precondition Failed`, so clients must read, merge, and retry without dropping actions learned by another worker.
 
 Servers advertising `features.blob_packs` accept the same digest-list JSON as `blobs:missing` at `POST /v1/blobs:pack`. The response media type is `application/vnd.mbx.cache-blob-pack.v1`. It begins with the eight-byte `MBXPACK1` magic and then streams visible blobs in request order. Each blob is framed by a one-byte algorithm (`1` for BLAKE3, `2` for SHA-256), its raw 32-byte hash, an unsigned big-endian 64-bit size, and exactly that many content bytes. Missing or unauthorized blobs are omitted, duplicate requests are emitted once, and clients must verify every digest before admitting content to local CAS. The response includes `Content-Length` for the exact framed response size, `mbx-cache-pack-blobs` for the visible blob count, and `mbx-cache-pack-bytes` for visible blob payload bytes excluding magic and framing. The aggregate declared size is bounded by `MBX_CACHE_MAX_BLOB_BYTES` and advertised as `limits.max_pack_bytes`.
+
+Servers advertising `features.blob_pack_uploads` accept the same framing in the other direction at `POST /v1/blobs:pack-upload`, with `Content-Type: application/vnd.mbx.cache-blob-pack.v1` and the blob count and payload bytes declared in `mbx-cache-pack-blobs` and `mbx-cache-pack-bytes`. The request may be `Content-Encoding: zstd`. Each frame is verified against the digest it declares before it is stored, exactly as a single upload is, and a frame that fails ends the request -- earlier frames may already be stored, which is harmless because blobs are immutable and content-addressed. A pack that contradicts its headers is refused. The response is `application/vnd.mbx.cache-blob-pack-receipt.v1+json`, reporting `created` and `existing` counts. There is no `If-None-Match` requirement: a pack only ever creates.
+
+Servers advertising `features.action_batch` answer `POST /v1/action-results:batch`, which takes the same digest-list JSON as `blobs:missing` and returns `application/vnd.mbx.cache-action-result-batch.v1+json`. The response carries only the results this namespace holds, in no particular order and at most once each, so clients bind each record to its request by the action digest inside it rather than by position. The request is bounded by `limits.max_batch_items`.
 
 `GET /v1/capabilities` advertises the action kinds and exact schema versions accepted by the server. Action-result keys use BLAKE3. Version 1 accepts task and rustc action and metadata schema version 1. Rustc results require an output directory tree plus metadata referencing raw stdout and stderr blobs so clients can replay compiler diagnostics byte-for-byte.
 

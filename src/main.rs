@@ -3,6 +3,7 @@ mod config;
 mod metadata;
 mod metrics;
 mod model;
+mod pack;
 mod server;
 mod storage;
 

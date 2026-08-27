@@ -8,10 +8,10 @@ use axum::{
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
 use mbx_cache_protocol::{
-    ActionKindCapability, BLOB_PACK_BLOBS_HEADER as PACK_BLOBS_HEADER,
-    BLOB_PACK_BYTES_HEADER as PACK_BYTES_HEADER, BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE,
-    Capabilities, CapabilityFeatures, CapabilityLimits, CapabilityProtocol, MAX_BATCH_ITEMS,
-    PROTOCOL_VERSION,
+    ACTION_RESULT_BATCH_MEDIA_TYPE, ActionKindCapability,
+    BLOB_PACK_BLOBS_HEADER as PACK_BLOBS_HEADER, BLOB_PACK_BYTES_HEADER as PACK_BYTES_HEADER,
+    BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, Capabilities,
+    CapabilityFeatures, CapabilityLimits, CapabilityProtocol, MAX_BATCH_ITEMS, PROTOCOL_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -38,6 +38,7 @@ use crate::{
         ActionResult, Algorithm, Digest, Directory, RustcAction, RustcMetadata, TaskAction,
         TaskActionManifest, TaskMetadata,
     },
+    pack::{PackError, PackEvent, PackReader},
     storage::{BlobStore, PutOutcome},
 };
 
@@ -84,6 +85,9 @@ pub fn router(state: AppState) -> Router {
             "/v1/blobs/{algorithm}/{hash}/{size}",
             get(get_blob).put(put_blob),
         )
+        // An uploaded pack is a blob upload that carries several blobs, so it
+        // belongs behind the same decoding and bounds as one.
+        .route("/v1/blobs:pack-upload", post(put_blob_pack))
         // Innermost: what the handler reads, after decoding.
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(RequestDecompressionLayer::new())
@@ -101,6 +105,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/action-results/{algorithm}/{hash}/{size}",
             get(get_action_result).put(put_action_result),
         )
+        .route("/v1/action-results:batch", post(batch_action_results))
         .route(
             "/v1/action-manifests/{algorithm}/{hash}/{size}",
             get(get_action_manifest).put(put_action_manifest),
@@ -128,43 +133,31 @@ async fn status() -> impl IntoResponse {
 }
 
 async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
-    Json(Capabilities {
-        protocol: CapabilityProtocol {
-            major: PROTOCOL_VERSION,
-            minor: 0,
-        },
-        digest_algorithms: vec!["blake3".into(), "sha256".into()],
-        compressors: vec!["identity".into(), "zstd".into()],
-        action_kinds: BTreeMap::from([
-            (
-                "rustc".into(),
-                ActionKindCapability {
-                    action_schema: 1,
-                    metadata_schema: 1,
-                },
-            ),
-            (
-                "task".into(),
-                ActionKindCapability {
-                    action_schema: 1,
-                    metadata_schema: 1,
-                },
-            ),
-        ]),
-        features: CapabilityFeatures {
-            action_manifests: true,
-            batch: true,
-            blob_packs: true,
-            resumable_uploads: false,
-            delegated_transfers: false,
-        },
-        limits: CapabilityLimits {
-            max_batch_items: MAX_BATCH_ITEMS as u64,
-            max_inline_blob_bytes: 1_048_576,
-            max_blob_bytes: state.max_blob_bytes,
-            max_pack_bytes: state.max_blob_bytes,
-        },
-    })
+    // Built through the protocol crate's constructors rather than as struct
+    // literals: the records are non-exhaustive so that a later minor can
+    // describe a feature this service does not implement, and only what is
+    // assigned here is claimed.
+    let mut capabilities = Capabilities::new(CapabilityProtocol::new(PROTOCOL_VERSION, 0));
+    capabilities.digest_algorithms = vec!["blake3".into(), "sha256".into()];
+    capabilities.compressors = vec!["identity".into(), "zstd".into()];
+    capabilities.action_kinds = BTreeMap::from([
+        ("rustc".into(), ActionKindCapability::new(1, 1)),
+        ("task".into(), ActionKindCapability::new(1, 1)),
+    ]);
+    let mut features = CapabilityFeatures::default();
+    features.action_manifests = true;
+    features.batch = true;
+    features.action_batch = true;
+    features.blob_packs = true;
+    features.blob_pack_uploads = true;
+    capabilities.features = features;
+    let mut limits = CapabilityLimits::default();
+    limits.max_batch_items = MAX_BATCH_ITEMS as u64;
+    limits.max_inline_blob_bytes = 1_048_576;
+    limits.max_blob_bytes = state.max_blob_bytes;
+    limits.max_pack_bytes = state.max_blob_bytes;
+    capabilities.limits = limits;
+    Json(capabilities)
 }
 
 async fn get_blob(
@@ -266,6 +259,178 @@ async fn put_blob(
         PutOutcome::Created => StatusCode::CREATED,
         PutOutcome::AlreadyExists => StatusCode::NO_CONTENT,
     })
+}
+
+#[derive(Serialize)]
+struct BlobPackReceipt {
+    created: u64,
+    existing: u64,
+}
+
+/// Accept several blobs in one framed request.
+///
+/// Rustc output is many small objects, so a client that publishes them one
+/// request at a time spends most of its time in round trips. Each frame is
+/// verified against the digest it declares before it is stored, exactly as a
+/// single upload is: a pack is a transport for uploads, not a weaker kind of
+/// one. A frame that fails ends the request, which may leave the blobs before
+/// it stored -- they are content-addressed and immutable, so storing one that a
+/// client then re-sends individually costs nothing but the transfer.
+async fn put_blob_pack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let namespace = state.auth.authorize(&headers, Access::Write).await?;
+    let declared_blobs = required_u64_header(&headers, PACK_BLOBS_HEADER)?;
+    let declared_bytes = required_u64_header(&headers, PACK_BYTES_HEADER)?;
+    if declared_blobs > MAX_BATCH_ITEMS as u64 {
+        return Err(ApiError::bad_request(
+            "blob pack declares more blobs than the supported batch size",
+        ));
+    }
+    if declared_bytes > state.max_blob_bytes {
+        return Err(ApiError::too_large(
+            "blob pack exceeds the configured size limit",
+        ));
+    }
+    let mut reader = PackReader::new(state.max_blob_bytes, declared_blobs, declared_bytes);
+    let mut stream = body.into_data_stream();
+    let mut frame: Option<PackFrame> = None;
+    let mut created = 0;
+    let mut existing = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
+        for event in reader.push(&chunk).map_err(pack_error)? {
+            match event {
+                PackEvent::Started(digest) => {
+                    frame = Some(PackFrame::new(digest).await?);
+                }
+                PackEvent::Payload(payload) => {
+                    frame
+                        .as_mut()
+                        .ok_or_else(|| ApiError::internal("payload outside a blob pack frame"))?
+                        .write(&payload)
+                        .await?;
+                }
+                PackEvent::Complete => {
+                    let finished = frame.take().ok_or_else(|| {
+                        ApiError::internal("blob pack frame ended before it began")
+                    })?;
+                    match finished.store(&state, &namespace).await? {
+                        PutOutcome::Created => created += 1,
+                        PutOutcome::AlreadyExists => existing += 1,
+                    }
+                }
+            }
+        }
+    }
+    reader.finish().map_err(pack_error)?;
+    if reader.blobs() != declared_blobs || reader.payload_bytes() != declared_bytes {
+        return Err(ApiError::bad_request(
+            "blob pack does not carry what its headers declared",
+        ));
+    }
+    state.metrics.inc_blob_pack_upload(reader.blobs());
+    Ok((
+        [(header::CONTENT_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE)],
+        Json(BlobPackReceipt { created, existing }),
+    )
+        .into_response())
+}
+
+/// One frame of an uploaded pack, spooled and hashed as it arrives.
+struct PackFrame {
+    digest: Digest,
+    temp: NamedTempFile,
+    file: tokio::fs::File,
+    size: u64,
+    blake3: blake3::Hasher,
+    sha256: sha2::Sha256,
+}
+
+impl PackFrame {
+    async fn new(digest: Digest) -> Result<Self, ApiError> {
+        let temp = NamedTempFile::new().map_err(ApiError::internal)?;
+        let file = tokio::fs::File::create(temp.path())
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(Self {
+            digest,
+            temp,
+            file,
+            size: 0,
+            blake3: blake3::Hasher::new(),
+            sha256: sha2::Sha256::new(),
+        })
+    }
+
+    async fn write(&mut self, payload: &[u8]) -> Result<(), ApiError> {
+        self.size += payload.len() as u64;
+        match self
+            .digest
+            .algorithm_kind()
+            .map_err(ApiError::bad_request)?
+        {
+            Algorithm::Blake3 => {
+                self.blake3.update(payload);
+            }
+            Algorithm::Sha256 => {
+                self.sha256.update(payload);
+            }
+        }
+        self.file
+            .write_all(payload)
+            .await
+            .map_err(ApiError::internal)
+    }
+
+    async fn store(mut self, state: &AppState, namespace: &str) -> Result<PutOutcome, ApiError> {
+        self.file.flush().await.map_err(ApiError::internal)?;
+        let actual = match self
+            .digest
+            .algorithm_kind()
+            .map_err(ApiError::bad_request)?
+        {
+            Algorithm::Blake3 => self.blake3.finalize().to_hex().to_string(),
+            Algorithm::Sha256 => hex::encode(self.sha256.finalize()),
+        };
+        if self.size != self.digest.size || actual != self.digest.hash {
+            return Err(ApiError::bad_request(
+                "packed blob does not match its declared digest",
+            ));
+        }
+        let outcome = state
+            .blobs
+            .put(&self.digest, self.temp.path())
+            .await
+            .map_err(ApiError::internal)?;
+        state
+            .metadata
+            .register_blob(namespace, &self.digest, outcome)
+            .await
+            .map_err(ApiError::internal)?;
+        state.metrics.inc_blob_upload();
+        Ok(outcome)
+    }
+}
+
+/// A malformed pack is the client's error; an oversized one says which limit.
+fn pack_error(error: PackError) -> ApiError {
+    match error {
+        PackError::BlobTooLarge(..) | PackError::TooManyBytes(_) | PackError::TooManyBlobs(_) => {
+            ApiError::too_large(error.to_string())
+        }
+        other => ApiError::bad_request(other.to_string()),
+    }
+}
+
+fn required_u64_header(headers: &HeaderMap, name: &str) -> Result<u64, ApiError> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| ApiError::bad_request(format!("{name} must be an unsigned integer")))
 }
 
 #[derive(Deserialize)]
@@ -517,6 +682,50 @@ async fn get_action_result(
             Err(ApiError::not_found("action result not found"))
         }
     }
+}
+
+#[derive(Serialize)]
+struct ActionResultBatchResponse {
+    results: Vec<ActionResult>,
+}
+
+/// Answer for as many actions as one request asks about.
+///
+/// A build knows every action it wants before it asks for any of them, and
+/// asking one at a time costs a round trip each. The response carries only what
+/// this namespace holds; each record names its own action, so a client binds
+/// them back to its request without relying on order.
+async fn batch_action_results(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<MissingRequest>,
+) -> Result<Response, ApiError> {
+    let namespace = state.auth.authorize(&headers, Access::Read).await?;
+    if request.digests.len() > MAX_BATCH_ITEMS {
+        return Err(ApiError::bad_request("batch exceeds the supported size"));
+    }
+    let mut requested = Vec::with_capacity(request.digests.len());
+    let mut seen = HashSet::new();
+    for digest in request.digests {
+        let digest = validate_action_digest(digest)?;
+        if seen.insert(digest.clone()) {
+            requested.push(digest);
+        }
+    }
+    let results = state
+        .metadata
+        .get_batch(&namespace, &requested)
+        .await
+        .map_err(ApiError::internal)?;
+    state.metrics.inc_action_batch(
+        results.len() as u64,
+        (requested.len() - results.len()) as u64,
+    );
+    Ok((
+        [(header::CONTENT_TYPE, ACTION_RESULT_BATCH_MEDIA_TYPE)],
+        Json(ActionResultBatchResponse { results }),
+    )
+        .into_response())
 }
 
 async fn put_action_result(
@@ -994,6 +1203,15 @@ fn parse_digest((algorithm, hash, size): (String, String, u64)) -> Result<Digest
 
 fn parse_action_digest(parts: (String, String, u64)) -> Result<Digest, ApiError> {
     let digest = parse_digest(parts)?;
+    if digest.algorithm != "blake3" {
+        return Err(ApiError::bad_request("action result keys must use blake3"));
+    }
+    Ok(digest)
+}
+
+/// Check a digest a request body named, rather than one from a path.
+fn validate_action_digest(digest: Digest) -> Result<Digest, ApiError> {
+    validate_digest(&digest)?;
     if digest.algorithm != "blake3" {
         return Err(ApiError::bad_request("action result keys must use blake3"));
     }
@@ -1778,8 +1996,283 @@ mod tests {
         assert_eq!(body["action_kinds"]["rustc"]["action_schema"], 1);
         assert_eq!(body["action_kinds"]["rustc"]["metadata_schema"], 1);
         assert_eq!(body["features"]["blob_packs"], true);
+        assert_eq!(body["features"]["blob_pack_uploads"], true);
+        assert_eq!(body["features"]["action_batch"], true);
         assert_eq!(body["limits"]["max_pack_bytes"], 1024 * 1024);
+        // Not implemented here, and so not claimed.
+        assert_eq!(body["features"]["resumable_uploads"], false);
+        assert_eq!(body["features"]["delegated_transfers"], false);
         assert!(body["features"].get("signed_results").is_none());
+    }
+
+    /// Publish one committed action result, returning its action digest.
+    async fn publish_rustc_action(app: &Router, version: u8) -> Digest {
+        let action = upload_blob(app, &task_action(version)).await;
+        let metadata = upload_blob(app, &task_metadata("task", version)).await;
+        let uri = format!(
+            "/v1/action-results/{}/{}/{}",
+            action.algorithm, action.hash, action.size
+        );
+        let result = ActionResult {
+            action: action.clone(),
+            metadata: Some(metadata),
+            output_root: None,
+            version: 1,
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(request(
+                    "PUT",
+                    uri,
+                    Body::from(serde_json::to_vec(&result).unwrap())
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CREATED
+        );
+        action
+    }
+
+    /// The framing a client writes, mirroring `decode_blob_pack`.
+    fn encode_blob_pack(entries: &[(&Digest, &[u8])]) -> Vec<u8> {
+        let mut pack = BLOB_PACK_MAGIC.to_vec();
+        for (digest, payload) in entries {
+            pack.push(match digest.algorithm_kind().unwrap() {
+                Algorithm::Blake3 => 1,
+                Algorithm::Sha256 => 2,
+            });
+            pack.extend(hex::decode(&digest.hash).unwrap());
+            pack.extend(digest.size.to_be_bytes());
+            pack.extend_from_slice(payload);
+        }
+        pack
+    }
+
+    fn pack_request(pack: Vec<u8>, blobs: u64, bytes: u64) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/blobs:pack-upload")
+            .header("mbx-cache-protocol", "1")
+            .header("mbx-cache-namespace", "test/project")
+            .header(header::CONTENT_TYPE, BLOB_PACK_MEDIA_TYPE)
+            .header(PACK_BLOBS_HEADER, blobs)
+            .header(PACK_BYTES_HEADER, bytes)
+            .body(Body::from(pack))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stores_every_blob_in_an_uploaded_pack() {
+        let (app, _directory) = test_app().await;
+        let first_bytes = b"first packed upload";
+        let second_bytes = b"second packed upload";
+        let first = digest(first_bytes);
+        let second = digest(second_bytes);
+        let pack = encode_blob_pack(&[
+            (&first, first_bytes.as_slice()),
+            (&second, second_bytes.as_slice()),
+        ]);
+
+        let response = app
+            .clone()
+            .oneshot(pack_request(pack, 2, first.size + second.size))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["created"], 2);
+        assert_eq!(body["existing"], 0);
+        // Every blob is readable afterwards, exactly as individual uploads.
+        for (digest, expected) in [
+            (&first, first_bytes.as_slice()),
+            (&second, second_bytes.as_slice()),
+        ] {
+            let uri = format!(
+                "/v1/blobs/{}/{}/{}",
+                digest.algorithm, digest.hash, digest.size
+            );
+            let response = app
+                .clone()
+                .oneshot(request("GET", uri, Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let served = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(served.as_ref(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn counts_blobs_an_uploaded_pack_already_held() {
+        let (app, _directory) = test_app().await;
+        let bytes = b"already held";
+        let digest = upload_blob(&app, bytes).await;
+        let pack = encode_blob_pack(&[(&digest, bytes.as_slice())]);
+
+        let response = app
+            .oneshot(pack_request(pack, 1, digest.size))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["created"], 0);
+        assert_eq!(body["existing"], 1);
+    }
+
+    #[tokio::test]
+    async fn refuses_a_packed_blob_that_does_not_match_its_digest() {
+        let (app, _directory) = test_app().await;
+        let bytes = b"claimed contents";
+        let digest = digest(bytes);
+        // The frame declares one digest and carries different bytes of the same
+        // length, which a server must not take on trust.
+        let pack = encode_blob_pack(&[(&digest, b"swapped contents".as_slice())]);
+
+        let response = app
+            .clone()
+            .oneshot(pack_request(pack, 1, digest.size))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let uri = format!(
+            "/v1/blobs/{}/{}/{}",
+            digest.algorithm, digest.hash, digest.size
+        );
+        let response = app
+            .oneshot(request("GET", uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn refuses_a_pack_that_contradicts_its_headers() {
+        let (app, _directory) = test_app().await;
+        let bytes = b"one blob";
+        let digest = digest(bytes);
+        let pack = encode_blob_pack(&[(&digest, bytes.as_slice())]);
+
+        let response = app
+            .clone()
+            .oneshot(pack_request(pack.clone(), 2, digest.size))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .oneshot(pack_request(pack, 1, digest.size + 1))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn refuses_an_uploaded_pack_over_the_configured_limit() {
+        let (app, _directory) = app_with_blob_limit(16).await;
+        let bytes = b"larger than the configured blob limit";
+        let digest = digest(bytes);
+        let pack = encode_blob_pack(&[(&digest, bytes.as_slice())]);
+
+        let response = app
+            .oneshot(pack_request(pack, 1, digest.size))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn answers_batched_action_lookups_for_what_it_holds() {
+        let (app, _directory) = test_app().await;
+        let held = publish_rustc_action(&app, 1).await;
+        let absent = digest(b"absent action");
+        let body = serde_json::json!({ "digests": [held, absent] });
+
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/v1/action-results:batch".into(),
+                Body::from(serde_json::to_vec(&body).unwrap()),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(ACTION_RESULT_BATCH_MEDIA_TYPE)
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let results = body["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["action"]["hash"], held.hash.as_str());
+    }
+
+    #[tokio::test]
+    async fn batched_action_lookups_do_not_disclose_other_namespaces() {
+        let (app, _directory) = test_app().await;
+        let held = publish_rustc_action(&app, 1).await;
+        let body = serde_json::json!({ "digests": [held] });
+        let mut lookup = request(
+            "POST",
+            "/v1/action-results:batch".into(),
+            Body::from(serde_json::to_vec(&body).unwrap()),
+        );
+        lookup
+            .headers_mut()
+            .insert("mbx-cache-namespace", "other/project".parse().unwrap());
+
+        let response = app.oneshot(lookup).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(body["results"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refuses_batched_action_lookups_that_are_malformed() {
+        let (app, _directory) = test_app().await;
+        // A batch is a JSON route, so it keeps the strict body of the others.
+        let unknown = serde_json::json!({ "digests": [], "extra": true });
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/v1/action-results:batch".into(),
+                Body::from(serde_json::to_vec(&unknown).unwrap()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Action keys are blake3, as they are on the single-lookup route.
+        let sha256 = serde_json::json!({
+            "digests": [{"algorithm":"sha256","hash":"0".repeat(64),"size":1}],
+        });
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/v1/action-results:batch".into(),
+                Body::from(serde_json::to_vec(&sha256).unwrap()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
