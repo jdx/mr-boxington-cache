@@ -12,6 +12,7 @@ use mbx_cache_protocol::{
     BLOB_PACK_BLOBS_HEADER as PACK_BLOBS_HEADER, BLOB_PACK_BYTES_HEADER as PACK_BYTES_HEADER,
     BLOB_PACK_MAGIC, BLOB_PACK_MEDIA_TYPE, BLOB_PACK_RECEIPT_MEDIA_TYPE, Capabilities,
     CapabilityFeatures, CapabilityLimits, CapabilityProtocol, MAX_BATCH_ITEMS, PROTOCOL_VERSION,
+    TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -778,13 +779,13 @@ async fn get_action_manifest(
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("action manifest not found"))?;
-    let body = serde_json::to_vec(&record.manifest).map_err(ApiError::internal)?;
+    // Canonical, not serde's field order: the digest a client checks a manifest
+    // against is taken over canonical bytes, and `ActionPrediction` does not
+    // declare its fields in the order the canonicalization scheme sorts them.
+    let body = canonical_json(&record.manifest).map_err(ApiError::internal)?;
     Response::builder()
         .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            "application/vnd.mbx.cache-task-action-manifest.v1+json",
-        )
+        .header(header::CONTENT_TYPE, TASK_ACTION_MANIFEST_MEDIA_TYPE)
         .header(header::ETAG, quoted_etag(&record.etag))
         .body(Body::from(body))
         .map_err(ApiError::internal)
@@ -804,7 +805,9 @@ async fn put_action_manifest(
         ));
     }
     let expected_etag = manifest_precondition(&headers)?;
-    let bytes = serde_json::to_vec(&manifest).map_err(ApiError::internal)?;
+    // Over the same canonical bytes `get_action_manifest` serves, so an entity
+    // tag identifies what a client will actually read back.
+    let bytes = canonical_json(&manifest).map_err(ApiError::internal)?;
     let etag = blake3::hash(&bytes).to_hex().to_string();
     let outcome = state
         .metadata
@@ -2032,6 +2035,71 @@ mod tests {
             StatusCode::CREATED
         );
         action
+    }
+
+    /// A manifest is read back byte-for-byte as the canonical JSON its digest
+    /// is taken over.
+    ///
+    /// `ActionPrediction` does not declare its fields in the order the
+    /// canonicalization scheme sorts them, so serving serde's output made every
+    /// manifest carrying a prediction unreadable to a client -- which is the
+    /// entry point for warming a fresh checkout.
+    #[tokio::test]
+    async fn serves_action_manifests_as_canonical_json() {
+        let (app, _directory) = test_app().await;
+        let task = "b".repeat(64);
+        let manifest = action_manifest(&task, &[b"first action", b"second action"]);
+        let key = manifest.selector_digest();
+        let uri = format!(
+            "/v1/action-manifests/{}/{}/{}",
+            key.algorithm, key.hash, key.size
+        );
+        let expected = canonical_json(&manifest).unwrap();
+        assert_ne!(
+            expected,
+            serde_json::to_vec(&manifest).unwrap(),
+            "this manifest must actually distinguish the two encodings"
+        );
+        let put = app
+            .clone()
+            .oneshot(request(
+                "PUT",
+                uri.clone(),
+                Body::from(serde_json::to_vec(&manifest).unwrap()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::CREATED);
+        let put_etag = put
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+
+        let response = app
+            .oneshot(request("GET", uri, Body::empty()))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(TASK_ACTION_MANIFEST_MEDIA_TYPE)
+        );
+        // The tag a client echoes into `If-Match` names the bytes it just read.
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ETAG)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+            put_etag
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), expected);
     }
 
     /// The framing a client writes, mirroring `decode_blob_pack`.
