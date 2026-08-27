@@ -177,6 +177,7 @@ fi
 env "${common_env[@]}" \
   MBX_CACHE_GITHUB_WRITE_ACTOR_ID=987654 \
   MBX_CACHE_TEST_WRITE_ACTOR_ID=987654 \
+  OVH_SSH_PORT=2222 \
   OVH_SSH_SOURCE_CIDR=203.0.113.10/32 \
   "$script_dir/deploy.sh" --dry-run
 
