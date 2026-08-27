@@ -152,13 +152,13 @@ oidc_providers=$(jq -cn \
     rules: (
       (
         [$repositories[] as $entry | [
-          {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, actor_id: $write_actor_id, event_name: "push", ref_type: "branch", ref: "refs/heads/main"}, read: [$entry.repository], write: [$entry.repository]},
+          {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, actor_id: $write_actor_id, run_attempt: "1", event_name: "push", ref_type: "branch", ref: "refs/heads/main"}, read: [$entry.repository], write: [$entry.repository]},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, ref_type: "tag"}, read: [$entry.repository], write: []},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "pull_request"}, read: [$entry.repository], write: []},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "push"}, read: [$entry.repository], write: []}
         ]] | add
       ) + [
-        {claims: {repository: $deployment_repository, repository_owner_id: $deployment_owner_id, actor_id: $write_actor_id, environment: "production", workflow_ref: $deployment_workflow_ref}, read: [$deployment_repository], write: [$deployment_repository]}
+        {claims: {repository: $deployment_repository, repository_owner_id: $deployment_owner_id, actor_id: $write_actor_id, run_attempt: "1", environment: "production", workflow_ref: $deployment_workflow_ref}, read: [$deployment_repository], write: [$deployment_repository]}
       ]
     )
   }]')

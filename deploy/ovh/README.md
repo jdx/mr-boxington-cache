@@ -190,9 +190,12 @@ file to change the production allowlist, or set
 `MBX_CACHE_GITHUB_REPOSITORIES_FILE` to a different JSON file for another
 installation. Write grants additionally require GitHub's stable numeric
 `actor_id`; it defaults to jdx's account ID, `216188`, and can be changed with
-`MBX_CACHE_GITHUB_WRITE_ACTOR_ID`. Read-only grants do not restrict the actor,
-so pull requests and automation initiated by other accounts can still consume
-trusted cache entries without publishing new ones. Override
+`MBX_CACHE_GITHUB_WRITE_ACTOR_ID`. Write grants accept only the first attempt
+of a workflow run, because GitHub reruns retain the original actor's identity
+even when another account initiates the rerun. Read-only grants restrict
+neither the actor nor the run attempt, so pull requests, reruns, and automation
+initiated by other accounts can still consume trusted cache entries without
+publishing new ones. Override
 `MBX_CACHE_DEPLOY_GITHUB_REPOSITORY` and
 `MBX_CACHE_DEPLOY_GITHUB_OWNER_ID`, and
 `MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF` together when deployment is managed by
