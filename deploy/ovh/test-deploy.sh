@@ -77,6 +77,7 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
     ($rules | any(
       .claims.repository == $repository and
       .claims.repository_owner_id == "216188" and
+      .claims.actor_id == "216188" and
       .claims.event_name == "push" and
       .claims.ref_type == "branch" and
       .claims.ref == "refs/heads/main" and
@@ -108,6 +109,7 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
   ($rules | any(
     .claims.repository == "jdx/mr-boxington-cache" and
     .claims.repository_owner_id == "216188" and
+    .claims.actor_id == "216188" and
     .claims.environment == "production" and
     .claims.workflow_ref == "jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main" and
     .read == ["jdx/mr-boxington-cache"] and
@@ -150,6 +152,14 @@ if env "${common_env[@]}" \
   OVH_SSH_SOURCE_CIDR=203.0.113.10/32 \
   "$script_dir/deploy.sh" --dry-run >/dev/null 2>&1; then
   echo "deploy.sh accepted an image that was not pinned by digest" >&2
+  exit 1
+fi
+
+if env "${common_env[@]}" \
+  MBX_CACHE_GITHUB_WRITE_ACTOR_ID=not-numeric \
+  OVH_SSH_SOURCE_CIDR=203.0.113.10/32 \
+  "$script_dir/deploy.sh" --dry-run >/dev/null 2>&1; then
+  echo "deploy.sh accepted a non-numeric GitHub write actor ID" >&2
   exit 1
 fi
 

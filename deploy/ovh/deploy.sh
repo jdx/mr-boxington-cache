@@ -57,6 +57,7 @@ if [[ $OVH_SSH_SOURCE_CIDR =~ [[:space:]] ]]; then
 fi
 
 trusted_repositories_file=${MBX_CACHE_GITHUB_REPOSITORIES_FILE:-$script_dir/trusted-repositories.json}
+write_actor_id=${MBX_CACHE_GITHUB_WRITE_ACTOR_ID:-216188}
 deployment_repository=${MBX_CACHE_DEPLOY_GITHUB_REPOSITORY:-jdx/mr-boxington-cache}
 deployment_owner_id=${MBX_CACHE_DEPLOY_GITHUB_OWNER_ID:-216188}
 deployment_workflow_ref=${MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF:-jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main}
@@ -85,6 +86,10 @@ if ! trusted_repositories=$(jq -ce '
 fi
 if [[ ! $deployment_repository =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   echo "MBX_CACHE_DEPLOY_GITHUB_REPOSITORY must be an owner/repository name" >&2
+  exit 1
+fi
+if [[ ! $write_actor_id =~ ^[0-9]+$ ]]; then
+  echo "MBX_CACHE_GITHUB_WRITE_ACTOR_ID must be numeric" >&2
   exit 1
 fi
 if [[ ! $deployment_owner_id =~ ^[0-9]+$ ]]; then
@@ -136,6 +141,7 @@ fi
 
 oidc_providers=$(jq -cn \
   --arg audience "$cache_url" \
+  --arg write_actor_id "$write_actor_id" \
   --arg deployment_repository "$deployment_repository" \
   --arg deployment_owner_id "$deployment_owner_id" \
   --arg deployment_workflow_ref "$deployment_workflow_ref" \
@@ -146,13 +152,13 @@ oidc_providers=$(jq -cn \
     rules: (
       (
         [$repositories[] as $entry | [
-          {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "push", ref_type: "branch", ref: "refs/heads/main"}, read: [$entry.repository], write: [$entry.repository]},
+          {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, actor_id: $write_actor_id, event_name: "push", ref_type: "branch", ref: "refs/heads/main"}, read: [$entry.repository], write: [$entry.repository]},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, ref_type: "tag"}, read: [$entry.repository], write: []},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "pull_request"}, read: [$entry.repository], write: []},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "push"}, read: [$entry.repository], write: []}
         ]] | add
       ) + [
-        {claims: {repository: $deployment_repository, repository_owner_id: $deployment_owner_id, environment: "production", workflow_ref: $deployment_workflow_ref}, read: [$deployment_repository], write: [$deployment_repository]}
+        {claims: {repository: $deployment_repository, repository_owner_id: $deployment_owner_id, actor_id: $write_actor_id, environment: "production", workflow_ref: $deployment_workflow_ref}, read: [$deployment_repository], write: [$deployment_repository]}
       ]
     )
   }]')
