@@ -113,3 +113,21 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+
+  final:
+    permissions: {}
+    needs:
+      - deployment
+      - test
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    # Run on success or upstream failure but skip when the workflow is cancelled
+    # — `always()` would override `cancel-in-progress` and waste a runner.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Check job results
+        if: |
+          needs.deployment.result != 'success' ||
+          needs.test.result != 'success'
+        run: exit 1
+      - run: echo "All CI jobs completed successfully"
