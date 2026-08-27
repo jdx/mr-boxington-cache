@@ -176,7 +176,8 @@ role-password rotation.
 
 GitHub OIDC is configured with these server-enforced grants:
 
-- repositories listed in `trusted-repositories.json` on `main`: read/write;
+- repositories listed in `trusted-repositories.json` on `main`, when the
+  workflow run was initiated by the configured write actor: read/write;
 - tag workflows for listed repositories: read-only;
 - pull-request workflows for listed repositories: read-only;
 - other push workflows for listed repositories: read-only; and
@@ -187,7 +188,14 @@ Each trusted repository is paired with GitHub's stable numeric
 `repository_owner_id`; repository names must be unique. Edit the checked-in
 file to change the production allowlist, or set
 `MBX_CACHE_GITHUB_REPOSITORIES_FILE` to a different JSON file for another
-installation. Override
+installation. Write grants additionally require GitHub's stable numeric
+`actor_id`; it defaults to jdx's account ID, `216188`, and can be changed with
+`MBX_CACHE_GITHUB_WRITE_ACTOR_ID`. Write grants accept only the first attempt
+of a workflow run, because GitHub reruns retain the original actor's identity
+even when another account initiates the rerun. Read-only grants restrict
+neither the actor nor the run attempt, so pull requests, reruns, and automation
+initiated by other accounts can still consume trusted cache entries without
+publishing new ones. Override
 `MBX_CACHE_DEPLOY_GITHUB_REPOSITORY` and
 `MBX_CACHE_DEPLOY_GITHUB_OWNER_ID`, and
 `MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF` together when deployment is managed by

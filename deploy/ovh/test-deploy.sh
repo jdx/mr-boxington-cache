@@ -64,7 +64,9 @@ grep -Fq "MBX_CACHE_GRAFANA_CONFIG_HASH=\"$grafana_config_hash\"" "$project_dir/
 grep -Fq 'AWS_ACCESS_KEY_ID="r2-access-key"' "$project_dir/runtime/cache.env"
 grep -Fq 'AWS_SECRET_ACCESS_KEY="r2-secret-key"' "$project_dir/runtime/cache.env"
 oidc_json=$(sed -n 's/^MBX_CACHE_OIDC_PROVIDERS_JSON=//p' "$project_dir/runtime/cache.env" | jq -c fromjson)
-jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
+jq -e \
+  --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" \
+  --arg write_actor_id "${MBX_CACHE_TEST_WRITE_ACTOR_ID:?}" '
   .[0].rules as $rules |
   # Four rules per trusted repository -- protected-main push, tag, pull
   # request, other push -- plus the single deployment rule. Both the list and
@@ -77,6 +79,8 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
     ($rules | any(
       .claims.repository == $repository and
       .claims.repository_owner_id == "216188" and
+      .claims.actor_id == $write_actor_id and
+      .claims.run_attempt == "1" and
       .claims.event_name == "push" and
       .claims.ref_type == "branch" and
       .claims.ref == "refs/heads/main" and
@@ -86,6 +90,8 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
     ($rules | any(
       .claims.repository == $repository and
       .claims.repository_owner_id == "216188" and
+      .claims.actor_id == null and
+      .claims.run_attempt == null and
       .claims.ref_type == "tag" and
       .read == [$repository] and
       .write == []
@@ -93,6 +99,8 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
     ($rules | any(
       .claims.repository == $repository and
       .claims.repository_owner_id == "216188" and
+      .claims.actor_id == null and
+      .claims.run_attempt == null and
       .claims.event_name == "pull_request" and
       .read == [$repository] and
       .write == []
@@ -100,6 +108,8 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
     ($rules | any(
       .claims.repository == $repository and
       .claims.repository_owner_id == "216188" and
+      .claims.actor_id == null and
+      .claims.run_attempt == null and
       .claims.event_name == "push" and
       .read == [$repository] and
       .write == []
@@ -108,6 +118,8 @@ jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '
   ($rules | any(
     .claims.repository == "jdx/mr-boxington-cache" and
     .claims.repository_owner_id == "216188" and
+    .claims.actor_id == $write_actor_id and
+    .claims.run_attempt == "1" and
     .claims.environment == "production" and
     .claims.workflow_ref == "jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main" and
     .read == ["jdx/mr-boxington-cache"] and
@@ -130,6 +142,7 @@ trusted_repositories=$(jq -c 'map(.repository)' "$script_dir/trusted-repositorie
 common_env=(
   "CAPTURE_DIR=$test_root/capture"
   "MBX_CACHE_TEST_REPOSITORIES=$trusted_repositories"
+  "MBX_CACHE_TEST_WRITE_ACTOR_ID=216188"
   "MBX_CACHE_DATABASE_PASSWORD=database_password_123456"
   "MBX_CACHE_IMAGE=ghcr.io/jdx/mbx-cache@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   "OVH_SSH_HOST=mbx-cache-prod.tailnet.example"
@@ -152,6 +165,21 @@ if env "${common_env[@]}" \
   echo "deploy.sh accepted an image that was not pinned by digest" >&2
   exit 1
 fi
+
+if env "${common_env[@]}" \
+  MBX_CACHE_GITHUB_WRITE_ACTOR_ID=not-numeric \
+  OVH_SSH_SOURCE_CIDR=203.0.113.10/32 \
+  "$script_dir/deploy.sh" --dry-run >/dev/null 2>&1; then
+  echo "deploy.sh accepted a non-numeric GitHub write actor ID" >&2
+  exit 1
+fi
+
+env "${common_env[@]}" \
+  MBX_CACHE_GITHUB_WRITE_ACTOR_ID=987654 \
+  MBX_CACHE_TEST_WRITE_ACTOR_ID=987654 \
+  OVH_SSH_PORT=2222 \
+  OVH_SSH_SOURCE_CIDR=203.0.113.10/32 \
+  "$script_dir/deploy.sh" --dry-run
 
 invalid_repositories="$test_root/invalid-repositories.json"
 printf '%s\n' '[{"repository":"jdx/mise","repository_owner_id":"216188"},{"repository":"jdx/mise","repository_owner_id":"216188"}]' >"$invalid_repositories"
