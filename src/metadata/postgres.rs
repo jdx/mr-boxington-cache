@@ -212,6 +212,48 @@ impl MetadataStore for PostgresMetadata {
             .transpose()
     }
 
+    async fn get_batch(
+        &self,
+        namespace: &str,
+        actions: &[Digest],
+    ) -> anyhow::Result<Vec<ActionResult>> {
+        let actions = representable_digests(actions);
+        if actions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let algorithms = actions
+            .iter()
+            .map(|(digest, _)| digest.algorithm.to_string())
+            .collect::<Vec<_>>();
+        let hashes = actions
+            .iter()
+            .map(|(digest, _)| digest.hash.clone())
+            .collect::<Vec<_>>();
+        let sizes = actions.iter().map(|(_, size)| *size).collect::<Vec<_>>();
+        // The same join `visible_blobs` uses: one round trip for the whole
+        // request, and rows come back only for the actions this namespace holds.
+        let rows = sqlx::query(
+            "SELECT results.result \
+             FROM UNNEST($2::text[], $3::text[], $4::bigint[]) WITH ORDINALITY \
+                  AS requested(algorithm, hash, size, ordinality) \
+             JOIN action_results AS results \
+               ON results.algorithm = requested.algorithm \
+              AND results.hash = requested.hash \
+              AND results.size = requested.size \
+             WHERE results.namespace = $1 \
+             ORDER BY requested.ordinality",
+        )
+        .bind(namespace)
+        .bind(algorithms)
+        .bind(hashes)
+        .bind(sizes)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| serde_json::from_value(row.try_get("result")?).map_err(Into::into))
+            .collect()
+    }
+
     async fn commit(
         &self,
         namespace: &str,
@@ -727,6 +769,50 @@ mod tests {
         assert!(
             store.get(&elsewhere, &action).await.unwrap().is_none(),
             "action results do not leak across namespaces"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batched_lookup_returns_only_the_results_a_namespace_holds() {
+        let Some(store) = store().await else { return };
+        let elsewhere = namespace("action-batch-elsewhere");
+        let namespace = namespace("action-batch");
+        let first = test_digest("1", 51);
+        let second = test_digest("2", 52);
+        let absent = test_digest("3", 53);
+        for action in [&first, &second] {
+            store
+                .commit(&namespace, action, &action_result(action, None))
+                .await
+                .unwrap();
+        }
+        // Held by another namespace, so this one must not see it.
+        store
+            .commit(&elsewhere, &absent, &action_result(&absent, None))
+            .await
+            .unwrap();
+
+        let results = store
+            .get_batch(
+                &namespace,
+                &[first.clone(), absent.clone(), second.clone(), first.clone()],
+            )
+            .await
+            .unwrap();
+
+        let found: Vec<&Digest> = results.iter().map(|result| &result.action).collect();
+        assert_eq!(found, vec![&first, &second, &first]);
+        assert!(
+            store
+                .get_batch(&namespace, &[absent])
+                .await
+                .unwrap()
+                .is_empty(),
+            "a batch answers for nothing it does not hold"
+        );
+        assert!(
+            store.get_batch(&namespace, &[]).await.unwrap().is_empty(),
+            "an empty batch asks the database nothing"
         );
     }
 

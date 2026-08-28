@@ -27,7 +27,9 @@ pub struct Metrics {
     registry: Registry,
     blob_hits: Counter,
     blob_uploads: Counter,
+    blob_pack_uploads: Counter,
     action_hits: Counter,
+    action_batches: Counter,
     action_misses: Counter,
     action_commits: Counter,
     pack_requests: Family<OutcomeLabels, Counter>,
@@ -65,6 +67,18 @@ impl Metrics {
             "Blob uploads accepted by the service",
             blob_uploads.clone(),
         );
+        let blob_pack_uploads = Counter::default();
+        registry.register(
+            "blob_pack_uploads",
+            "Framed multi-blob uploads accepted by the service",
+            blob_pack_uploads.clone(),
+        );
+        let action_batches = Counter::default();
+        registry.register(
+            "action_batches",
+            "Batched action-result lookups answered by the service",
+            action_batches.clone(),
+        );
         let action_hits = Counter::default();
         registry.register(
             "action_hits",
@@ -99,7 +113,7 @@ impl Metrics {
         let pack_blobs = Family::default();
         registry.register(
             "pack_blobs",
-            "Unique blobs requested, served, or missing in blob packs",
+            "Blobs requested, served, or missing in served packs, or accepted in uploaded packs",
             pack_blobs.clone(),
         );
         let pack_bytes = Family::default();
@@ -143,6 +157,8 @@ impl Metrics {
             registry,
             blob_hits,
             blob_uploads,
+            blob_pack_uploads,
+            action_batches,
             action_hits,
             action_misses,
             action_commits,
@@ -170,6 +186,25 @@ impl Metrics {
 
     pub fn inc_blob_upload(&self) {
         self.blob_uploads.inc();
+    }
+
+    /// Record one batched lookup, and the results it did and did not find.
+    ///
+    /// The hit and miss counters stay comparable with the single-lookup
+    /// endpoint's, so a batching client does not make them read as a collapse
+    /// in traffic.
+    pub fn inc_action_batch(&self, hits: u64, misses: u64) {
+        self.action_batches.inc();
+        self.action_hits.inc_by(hits);
+        self.action_misses.inc_by(misses);
+    }
+
+    /// Record one accepted pack upload and how many blobs it carried.
+    pub fn inc_blob_pack_upload(&self, blobs: u64) {
+        self.blob_pack_uploads.inc();
+        self.pack_blobs
+            .get_or_create(&KindLabels { kind: "uploaded" })
+            .inc_by(blobs);
     }
 
     pub fn inc_action_hit(&self) {

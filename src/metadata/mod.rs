@@ -72,6 +72,24 @@ pub trait MetadataStore: Send + Sync {
         Ok(())
     }
     async fn get(&self, namespace: &str, action: &Digest) -> anyhow::Result<Option<ActionResult>>;
+    /// Look up several action results at once, returning only the ones held.
+    ///
+    /// A client asking about a whole build's actions would otherwise cost one
+    /// query per action. The default implementation is the loop that describes,
+    /// which a store with no way to ask for many rows at once cannot improve on.
+    async fn get_batch(
+        &self,
+        namespace: &str,
+        actions: &[Digest],
+    ) -> anyhow::Result<Vec<ActionResult>> {
+        let mut results = Vec::new();
+        for action in actions {
+            if let Some(result) = self.get(namespace, action).await? {
+                results.push(result);
+            }
+        }
+        Ok(results)
+    }
     async fn commit(
         &self,
         namespace: &str,
