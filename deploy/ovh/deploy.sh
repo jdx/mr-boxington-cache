@@ -153,6 +153,7 @@ oidc_providers=$(jq -cn \
       (
         [$repositories[] as $entry | [
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, actor_id: $write_actor_id, run_attempt: "1", event_name: "push", ref_type: "branch", ref: "refs/heads/main"}, read: [$entry.repository], write: [$entry.repository]},
+          {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, actor_id: $write_actor_id, run_attempt: "1", event_name: "workflow_dispatch", ref_type: "branch", ref: "refs/heads/main", workflow_ref: ($entry.repository + "/.github/workflows/warm-cache-benchmark.yml@refs/heads/main")}, read: [$entry.repository], write: [$entry.repository]},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, ref_type: "tag"}, read: [$entry.repository], write: []},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "pull_request"}, read: [$entry.repository], write: []},
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "push"}, read: [$entry.repository], write: []}

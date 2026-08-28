@@ -178,6 +178,8 @@ GitHub OIDC is configured with these server-enforced grants:
 
 - repositories listed in `trusted-repositories.json` on `main`, when the
   workflow run was initiated by the configured write actor: read/write;
+- each listed repository's exact `warm-cache-benchmark.yml` workflow when
+  manually dispatched by the configured write actor on `main`: read/write;
 - tag workflows for listed repositories: read-only;
 - pull-request workflows for listed repositories: read-only;
 - other push workflows for listed repositories: read-only; and
