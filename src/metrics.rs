@@ -113,7 +113,7 @@ impl Metrics {
         let pack_blobs = Family::default();
         registry.register(
             "pack_blobs",
-            "Unique blobs requested, served, or missing in blob packs",
+            "Blobs requested, served, or missing in served packs, or accepted in uploaded packs",
             pack_blobs.clone(),
         );
         let pack_bytes = Family::default();
@@ -199,6 +199,7 @@ impl Metrics {
         self.action_misses.inc_by(misses);
     }
 
+    /// Record one accepted pack upload and how many blobs it carried.
     pub fn inc_blob_pack_upload(&self, blobs: u64) {
         self.blob_pack_uploads.inc();
         self.pack_blobs

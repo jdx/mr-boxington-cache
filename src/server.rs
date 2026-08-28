@@ -86,9 +86,6 @@ pub fn router(state: AppState) -> Router {
             "/v1/blobs/{algorithm}/{hash}/{size}",
             get(get_blob).put(put_blob),
         )
-        // An uploaded pack is a blob upload that carries several blobs, so it
-        // belongs behind the same decoding and bounds as one.
-        .route("/v1/blobs:pack-upload", post(put_blob_pack))
         // Innermost: what the handler reads, after decoding.
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(RequestDecompressionLayer::new())
@@ -96,10 +93,22 @@ pub fn router(state: AppState) -> Router {
         // its own -- a skippable frame is arbitrarily large and decodes to
         // nothing, so a limit on decoded bytes never sees it.
         .layer(RequestBodyLimitLayer::new(limit));
+    // `max_pack_bytes` is a payload budget. Leave room for the magic prefix
+    // and one fixed-size frame header per possible blob so a pack carrying the
+    // advertised maximum payload is not rejected by the transport layer.
+    let pack_limit = limit
+        .saturating_add(BLOB_PACK_MAGIC.len())
+        .saturating_add(BLOB_PACK_HEADER_BYTES.saturating_mul(MAX_BATCH_ITEMS));
+    let pack_uploads = Router::new()
+        .route("/v1/blobs:pack-upload", post(put_blob_pack))
+        .layer(RequestBodyLimitLayer::new(pack_limit))
+        .layer(RequestDecompressionLayer::new())
+        .layer(RequestBodyLimitLayer::new(pack_limit));
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/capabilities", get(capabilities))
         .merge(blobs)
+        .merge(pack_uploads)
         .route("/v1/blobs:missing", post(missing_blobs))
         .route("/v1/blobs:pack", post(pack_blobs))
         .route(
@@ -351,6 +360,7 @@ struct PackFrame {
 }
 
 impl PackFrame {
+    /// Start spooling and hashing the payload declared by one frame header.
     async fn new(digest: Digest) -> Result<Self, ApiError> {
         let temp = NamedTempFile::new().map_err(ApiError::internal)?;
         let file = tokio::fs::File::create(temp.path())
@@ -366,6 +376,7 @@ impl PackFrame {
         })
     }
 
+    /// Extend the spool and the digest calculation with one payload chunk.
     async fn write(&mut self, payload: &[u8]) -> Result<(), ApiError> {
         self.size += payload.len() as u64;
         match self
@@ -386,6 +397,7 @@ impl PackFrame {
             .map_err(ApiError::internal)
     }
 
+    /// Verify and publish a completed frame as an ordinary blob upload.
     async fn store(mut self, state: &AppState, namespace: &str) -> Result<PutOutcome, ApiError> {
         self.file.flush().await.map_err(ApiError::internal)?;
         let actual = match self
@@ -426,6 +438,7 @@ fn pack_error(error: PackError) -> ApiError {
     }
 }
 
+/// Parse a required unsigned request header.
 fn required_u64_header(headers: &HeaderMap, name: &str) -> Result<u64, ApiError> {
     headers
         .get(name)
@@ -2240,6 +2253,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Framing overhead does not consume the advertised payload allowance.
+    #[tokio::test]
+    async fn accepts_an_uploaded_pack_at_the_configured_payload_limit() {
+        let bytes = b"exactly-16-bytes";
+        assert_eq!(bytes.len(), 16);
+        let (app, _directory) = app_with_blob_limit(bytes.len() as u64).await;
+        let digest = digest(bytes);
+        let pack = encode_blob_pack(&[(&digest, bytes.as_slice())]);
+        assert_eq!(
+            pack.len(),
+            BLOB_PACK_MAGIC.len() + BLOB_PACK_HEADER_BYTES + bytes.len()
+        );
+
+        let response = app
+            .oneshot(pack_request(pack, 1, digest.size))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

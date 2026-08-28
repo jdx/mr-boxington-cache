@@ -170,6 +170,7 @@ impl PackReader {
         self.buffer.len() == wanted
     }
 
+    /// Decode the complete frame header currently held in the buffer.
     fn parse_header(&self) -> Result<Digest, PackError> {
         let algorithm = match self.buffer[0] {
             1 => Algorithm::Blake3,
