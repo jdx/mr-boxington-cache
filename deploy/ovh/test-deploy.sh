@@ -68,13 +68,14 @@ jq -e \
   --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" \
   --arg write_actor_id "${MBX_CACHE_TEST_WRITE_ACTOR_ID:?}" '
   .[0].rules as $rules |
-  # Four rules per trusted repository -- protected-main push, tag, pull
-  # request, other push -- plus the single deployment rule. Both the list and
-  # the count come from the allowlist the deploy just consumed, so adding a
+  # Five rules per trusted repository -- protected-main push, the exact warm
+  # benchmark dispatch, tag, pull request, and other push -- plus the single
+  # deployment rule. Both the list and the count come from the allowlist the
+  # deploy just consumed, so adding a
   # repository does not fail this on a restated name or a stale number. What
   # is still checked is that every configured repository got exactly those
-  # four rules and that nothing generated a rule beyond them.
-  ($rules | length == ($repositories | length) * 4 + 1) and
+  # five rules and that nothing generated a rule beyond them.
+  ($rules | length == ($repositories | length) * 5 + 1) and
   ($repositories | all(. as $repository |
     ($rules | any(
       .claims.repository == $repository and
@@ -84,6 +85,18 @@ jq -e \
       .claims.event_name == "push" and
       .claims.ref_type == "branch" and
       .claims.ref == "refs/heads/main" and
+      .read == [$repository] and
+      .write == [$repository]
+    )) and
+    ($rules | any(
+      .claims.repository == $repository and
+      .claims.repository_owner_id == "216188" and
+      .claims.actor_id == $write_actor_id and
+      .claims.run_attempt == "1" and
+      .claims.event_name == "workflow_dispatch" and
+      .claims.ref_type == "branch" and
+      .claims.ref == "refs/heads/main" and
+      .claims.workflow_ref == ($repository + "/.github/workflows/warm-cache-benchmark.yml@refs/heads/main") and
       .read == [$repository] and
       .write == [$repository]
     )) and
