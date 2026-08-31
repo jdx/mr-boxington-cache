@@ -8,6 +8,14 @@ commits, namespace isolation, typed action schemas, and streaming transfers.
 
 > This project is experimental and is not intended for others to use yet.
 
+> [!WARNING]
+> Remote caching works and is actively improving, but does not yet make mbx
+> consistently faster than
+> [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) on
+> GitHub-hosted runners. Benchmark end-to-end before replacing an existing CI
+> cache. Investigations, discussions, and pull requests to improve it are
+> welcome.
+
 User documentation lives at
 [mr-boxington.jdx.dev/cache-server](https://mr-boxington.jdx.dev/cache-server);
 this README carries the implementation and operations detail beyond it.
