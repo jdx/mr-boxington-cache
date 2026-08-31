@@ -29,7 +29,12 @@ pub struct Config {
     pub database_url: String,
 
     /// Maximum concurrent PostgreSQL connections used for metadata requests.
-    #[arg(long, env = "MBX_CACHE_DATABASE_MAX_CONNECTIONS", default_value_t = 32)]
+    #[arg(
+        long,
+        env = "MBX_CACHE_DATABASE_MAX_CONNECTIONS",
+        default_value_t = 32,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     pub database_max_connections: u32,
 
     /// Sweep metadata older than this many days, then exit without serving.
@@ -69,4 +74,14 @@ pub struct Config {
 
     #[arg(long, env = "MBX_CACHE_MAX_BLOB_BYTES", default_value_t = 5 * 1024 * 1024 * 1024_u64)]
     pub max_blob_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_an_empty_database_pool() {
+        assert!(Config::try_parse_from(["mbx-cache", "--database-max-connections", "0"]).is_err());
+    }
 }
