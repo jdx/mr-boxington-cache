@@ -16,6 +16,10 @@ pub struct PostgresMetadata {
 
 impl PostgresMetadata {
     pub async fn connect(url: &str, max_connections: u32) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            max_connections > 0,
+            "database max connections must be at least 1"
+        );
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .connect(url)
@@ -370,6 +374,18 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[tokio::test]
+    async fn an_empty_connection_pool_is_rejected_before_connecting() {
+        let error = PostgresMetadata::connect("postgres://unreachable.invalid/cache", 0)
+            .await
+            .err()
+            .expect("a zero-sized pool must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "database max connections must be at least 1"
+        );
     }
 
     /// A namespace no other test shares, so one database serves them all.
