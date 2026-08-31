@@ -8,6 +8,15 @@ commits, namespace isolation, typed action schemas, and streaming transfers.
 
 > This project is experimental and is not intended for others to use yet.
 
+> [!WARNING]
+> This server does not currently make mbx competitive with
+> [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) on
+> GitHub-hosted runners. In our warm-cache benchmarks, transferring the
+> server-backed action closure took longer than restoring a rust-cache target
+> archive and completing the build. Treat the server as experimental
+> infrastructure for nearby trusted runners, and benchmark end-to-end before
+> replacing an existing CI cache.
+
 User documentation lives at
 [mr-boxington.jdx.dev/cache-server](https://mr-boxington.jdx.dev/cache-server);
 this README carries the implementation and operations detail beyond it.
