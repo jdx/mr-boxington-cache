@@ -117,10 +117,15 @@ pub trait MetadataStore: Send + Sync {
     }
 }
 
-pub async fn from_url(url: &str) -> anyhow::Result<std::sync::Arc<dyn MetadataStore>> {
+pub async fn from_url(
+    url: &str,
+    max_connections: u32,
+) -> anyhow::Result<std::sync::Arc<dyn MetadataStore>> {
     if url == "memory://" {
         Ok(std::sync::Arc::new(MemoryMetadata::default()))
     } else {
-        Ok(std::sync::Arc::new(PostgresMetadata::connect(url).await?))
+        Ok(std::sync::Arc::new(
+            PostgresMetadata::connect(url, max_connections).await?,
+        ))
     }
 }

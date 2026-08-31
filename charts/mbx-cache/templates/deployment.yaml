@@ -22,6 +22,7 @@ spec:
           env:
             - {name: MBX_CACHE_STORAGE, value: {{ .Values.config.storage | quote }}}
             - {name: MBX_CACHE_DATABASE_URL, value: {{ required "config.databaseUrl is required" .Values.config.databaseUrl | quote }}}
+            - {name: MBX_CACHE_DATABASE_MAX_CONNECTIONS, value: {{ .Values.config.databaseMaxConnections | quote }}}
             - {name: MBX_CACHE_S3_BUCKET, value: {{ required "config.s3Bucket is required" .Values.config.s3Bucket | quote }}}
             - {name: MBX_CACHE_S3_PREFIX, value: {{ .Values.config.s3Prefix | quote }}}
             - {name: MBX_CACHE_S3_REGION, value: {{ .Values.config.s3Region | quote }}}

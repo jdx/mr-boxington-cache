@@ -25,7 +25,8 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    let metadata = metadata::from_url(&config.database_url).await?;
+    let metadata =
+        metadata::from_url(&config.database_url, config.database_max_connections).await?;
     // A sweep is an operator action, not part of serving: do it and exit rather
     // than deleting from under a live server.
     if let Some(days) = config.sweep_metadata_older_than_days {

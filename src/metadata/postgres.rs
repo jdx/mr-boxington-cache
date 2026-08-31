@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
 use super::{CommitOutcome, ManifestCommitOutcome, ManifestRecord, MetadataStore, SweepOutcome};
 use crate::model::{ActionResult, Digest, TaskActionManifest};
@@ -15,8 +15,11 @@ pub struct PostgresMetadata {
 }
 
 impl PostgresMetadata {
-    pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let pool = PgPool::connect(url).await?;
+    pub async fn connect(url: &str, max_connections: u32) -> anyhow::Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect(url)
+            .await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
     }
@@ -230,17 +233,23 @@ impl MetadataStore for PostgresMetadata {
             .map(|(digest, _)| digest.hash.clone())
             .collect::<Vec<_>>();
         let sizes = actions.iter().map(|(_, size)| *size).collect::<Vec<_>>();
-        // The same join `visible_blobs` uses: one round trip for the whole
-        // request, and rows come back only for the actions this namespace holds.
+        // Keep this as one round trip, but make every requested digest an
+        // explicit primary-key probe. A join against the whole action-results
+        // relation can turn into a hash join as a namespace grows, scanning and
+        // decoding every cached row to answer a few hundred requested keys.
+        // The correlated scalar subquery is unique by the primary key and keeps
+        // the cost proportional to the request instead of the namespace.
         let rows = sqlx::query(
-            "SELECT results.result \
+            "SELECT ( \
+                 SELECT results.result \
+                 FROM action_results AS results \
+                 WHERE results.namespace = $1 \
+                   AND results.algorithm = requested.algorithm \
+                   AND results.hash = requested.hash \
+                   AND results.size = requested.size \
+             ) AS result \
              FROM UNNEST($2::text[], $3::text[], $4::bigint[]) WITH ORDINALITY \
                   AS requested(algorithm, hash, size, ordinality) \
-             JOIN action_results AS results \
-               ON results.algorithm = requested.algorithm \
-              AND results.hash = requested.hash \
-              AND results.size = requested.size \
-             WHERE results.namespace = $1 \
              ORDER BY requested.ordinality",
         )
         .bind(namespace)
@@ -250,7 +259,13 @@ impl MetadataStore for PostgresMetadata {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
-            .map(|row| serde_json::from_value(row.try_get("result")?).map_err(Into::into))
+            .filter_map(
+                |row| match row.try_get::<Option<serde_json::Value>, _>("result") {
+                    Ok(Some(result)) => Some(serde_json::from_value(result).map_err(Into::into)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error.into())),
+                },
+            )
             .collect()
     }
 
@@ -340,7 +355,7 @@ mod tests {
     async fn store() -> Option<PostgresMetadata> {
         match std::env::var("MBX_CACHE_TEST_DATABASE_URL") {
             Ok(url) => Some(
-                PostgresMetadata::connect(&url)
+                PostgresMetadata::connect(&url, 4)
                     .await
                     .expect("the test database should accept connections"),
             ),

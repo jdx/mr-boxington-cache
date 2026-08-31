@@ -28,6 +28,10 @@ pub struct Config {
     #[arg(long, env = "MBX_CACHE_DATABASE_URL", default_value = "memory://")]
     pub database_url: String,
 
+    /// Maximum concurrent PostgreSQL connections used for metadata requests.
+    #[arg(long, env = "MBX_CACHE_DATABASE_MAX_CONNECTIONS", default_value_t = 32)]
+    pub database_max_connections: u32,
+
     /// Sweep metadata older than this many days, then exit without serving.
     ///
     /// R2 expires the objects themselves through a lifecycle rule, which leaves

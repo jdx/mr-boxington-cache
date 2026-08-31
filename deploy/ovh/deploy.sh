@@ -213,6 +213,7 @@ write_dotenv() {
   write_dotenv MBX_CACHE_STORAGE s3
   write_dotenv MBX_CACHE_DATABASE_URL \
     "postgres://mise_cache:$MBX_CACHE_DATABASE_PASSWORD@postgres/mise_cache"
+  write_dotenv MBX_CACHE_DATABASE_MAX_CONNECTIONS 32
   write_dotenv MBX_CACHE_S3_BUCKET "$r2_bucket"
   write_dotenv MBX_CACHE_S3_PREFIX v1
   write_dotenv MBX_CACHE_S3_ENDPOINT "$r2_endpoint"
