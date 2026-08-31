@@ -17,6 +17,13 @@ commits, namespace isolation, typed action schemas, and streaming transfers.
 > infrastructure for nearby trusted runners, and benchmark end-to-end before
 > replacing an existing CI cache.
 
+The server may still be the better fit when fine-grained results need to be
+shared across worktrees, jobs, or several concurrent builds; when operators
+want namespace isolation, separate read/write grants, short-lived OIDC, and
+self-hosted control; or when one service should cache both mbx compilations
+and mise tasks. Those are operational and reuse advantages, not evidence of
+faster GitHub-hosted CI today.
+
 User documentation lives at
 [mr-boxington.jdx.dev/cache-server](https://mr-boxington.jdx.dev/cache-server);
 this README carries the implementation and operations detail beyond it.
