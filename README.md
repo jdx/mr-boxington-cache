@@ -13,7 +13,8 @@ commits, namespace isolation, typed action schemas, and streaming transfers.
 > consistently faster than
 > [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) on
 > GitHub-hosted runners. Benchmark end-to-end before replacing an existing CI
-> cache.
+> cache. Investigations, discussions, and pull requests to improve it are
+> welcome.
 
 User documentation lives at
 [mr-boxington.jdx.dev/cache-server](https://mr-boxington.jdx.dev/cache-server);
