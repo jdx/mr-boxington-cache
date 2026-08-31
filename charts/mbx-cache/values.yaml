@@ -11,6 +11,7 @@ resources:
 config:
   storage: s3
   databaseUrl: ""
+  databaseMaxConnections: 32
   s3Bucket: ""
   s3Prefix: v1
   s3Region: us-east-1

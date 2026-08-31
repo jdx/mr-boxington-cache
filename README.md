@@ -78,6 +78,7 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_STORAGE` | `filesystem` | `filesystem` or `s3` |
 | `MBX_CACHE_DATA_DIR` | `/var/lib/mbx-cache` | Filesystem blob root |
 | `MBX_CACHE_DATABASE_URL` | `memory://` | PostgreSQL URL or development memory store |
+| `MBX_CACHE_DATABASE_MAX_CONNECTIONS` | `32` | Maximum concurrent PostgreSQL metadata connections |
 | `MBX_CACHE_S3_BUCKET` | — | Required for S3 storage |
 | `MBX_CACHE_S3_PREFIX` | `v1` | Object-key prefix |
 | `MBX_CACHE_S3_ENDPOINT` | AWS default | S3-compatible endpoint |
