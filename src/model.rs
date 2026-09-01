@@ -104,6 +104,8 @@ pub struct RustcAction {
     pub arguments: Vec<String>,
     pub environment: BTreeMap<String, Option<String>>,
     pub inputs: Vec<RustcInput>,
+    #[serde(default)]
+    pub linker: Option<RustcLinkerIdentity>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,6 +123,20 @@ pub struct RustcInput {
     /// Identifies local input content for the action key. This is not a CAS
     /// reference: compiler source inputs are never uploaded to the service.
     pub digest: Digest,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustcLinkerIdentity {
+    pub driver: String,
+    pub driver_version: String,
+    pub linker_version: String,
+    #[serde(default)]
+    pub crt_objects: BTreeMap<String, Digest>,
+    #[serde(default)]
+    pub sdk: Option<String>,
+    #[serde(default)]
+    pub deployment_target: Option<String>,
 }
 
 fn valid_string(value: &str) -> bool {
@@ -221,6 +237,10 @@ impl RustcAction {
                 .inputs
                 .iter()
                 .all(|input| input.validate() && input_paths.insert(&input.path))
+            && self
+                .linker
+                .as_ref()
+                .is_none_or(RustcLinkerIdentity::validate)
     }
 }
 
@@ -235,6 +255,25 @@ impl RustcCompiler {
 impl RustcInput {
     fn validate(&self) -> bool {
         valid_normalized_path(&self.path) && self.digest.validate().is_ok()
+    }
+}
+
+impl RustcLinkerIdentity {
+    fn validate(&self) -> bool {
+        [&self.driver, &self.driver_version, &self.linker_version]
+            .into_iter()
+            .all(|value| !value.is_empty() && valid_string(value))
+            && self.crt_objects.iter().all(|(name, digest)| {
+                !name.is_empty() && valid_string(name) && digest.validate().is_ok()
+            })
+            && self
+                .sdk
+                .as_deref()
+                .is_none_or(|value| !value.is_empty() && valid_string(value))
+            && self
+                .deployment_target
+                .as_deref()
+                .is_none_or(|value| !value.is_empty() && valid_string(value))
     }
 }
 

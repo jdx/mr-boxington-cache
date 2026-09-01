@@ -2476,6 +2476,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publishes_native_link_results_without_uploading_linker_inputs() {
+        let (app, _directory) = test_app().await;
+        // Linker identity digests key host CRT inputs; like source-input
+        // digests, they are not remote CAS references.
+        let source = digest(b"fn main() {}\n");
+        let crt = digest(b"host crt object");
+        let mut action: serde_json::Value =
+            serde_json::from_slice(&rustc_action(&source, 1)).unwrap();
+        action["linker"] = serde_json::json!({
+            "crt_objects":{"crt1.o":crt},
+            "deployment_target":null,
+            "driver":"/usr/bin/cc",
+            "driver_version":"cc 15.2.0",
+            "linker_version":"GNU ld 2.45",
+            "sdk":null
+        });
+        let action = upload_blob(&app, &canonical(action)).await;
+        let stdout = upload_blob(&app, b"").await;
+        let stderr = upload_blob(&app, b"linker diagnostic\n").await;
+        let metadata = upload_blob(&app, &rustc_metadata(&stdout, &stderr, 1)).await;
+        let executable = upload_blob(&app, b"linked executable").await;
+        let output_root = upload_blob(&app, &output_directory(&executable)).await;
+        let result_uri = format!(
+            "/v1/action-results/{}/{}/{}",
+            action.algorithm, action.hash, action.size
+        );
+        let body = serde_json::to_vec(&ActionResult {
+            action,
+            metadata: Some(metadata),
+            output_root: Some(output_root),
+            version: 1,
+        })
+        .unwrap();
+
+        assert_eq!(
+            app.oneshot(request("PUT", result_uri, Body::from(body)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CREATED
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_incomplete_rustc_results() {
         let (app, _directory) = test_app().await;
         let source = digest(b"pub fn widget() {}\n");
