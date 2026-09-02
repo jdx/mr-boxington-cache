@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use object_store::{
-    CopyMode, CopyOptions, Error, ObjectStore, ObjectStoreExt, azure::MicrosoftAzureBuilder,
-    buffered::BufWriter, path::Path as ObjectPath,
+    CopyMode, CopyOptions, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions,
+    azure::MicrosoftAzureBuilder, buffered::BufWriter, path::Path as ObjectPath,
 };
 use std::{io, path::Path, sync::Arc};
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -61,11 +61,13 @@ impl AzureStore {
         ObjectPath::from(format!("{}/uploads/{}", self.prefix, Uuid::new_v4()))
     }
 
-    async fn wait_until_readable(&self, key: &ObjectPath) -> anyhow::Result<()> {
+    async fn wait_until_readable(&self, key: &ObjectPath, size: u64) -> anyhow::Result<()> {
         // Copy Blob may return while the destination is still an empty pending
-        // blob. Azure only exposes block-blob contents after the copy commits.
+        // blob. Reading its final byte proves the block blob has committed
+        // without downloading it again.
+        let last_byte = size - 1..size;
         for _ in 0..120 {
-            if self.store.get(key).await.is_ok() {
+            if self.store.get_range(key, last_byte.clone()).await.is_ok() {
                 return Ok(());
             }
             sleep(Duration::from_millis(500)).await;
@@ -99,8 +101,29 @@ impl BlobStore for AzureStore {
     }
 
     async fn put(&self, digest: &Digest, source: &Path) -> anyhow::Result<PutOutcome> {
-        let upload_key = self.upload_key();
         let destination_key = self.key(digest);
+        if digest.size == 0 {
+            let result = self
+                .store
+                .put_opts(
+                    &destination_key,
+                    Vec::new().into(),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            return match result {
+                Ok(_) => Ok(PutOutcome::Created),
+                Err(Error::AlreadyExists { .. } | Error::Precondition { .. }) => {
+                    Ok(PutOutcome::AlreadyExists)
+                }
+                Err(error) => Err(error.into()),
+            };
+        }
+
+        let upload_key = self.upload_key();
         let file = tokio::fs::File::open(source).await?;
         let mut reader = BufReader::new(file);
         let mut writer = BufWriter::new(Arc::clone(&self.store), upload_key.clone());
@@ -129,12 +152,14 @@ impl BlobStore for AzureStore {
             // Keep the source until the uploads lifecycle removes it because
             // Azure may still be reading it after accepting Copy Blob.
             Ok(_) => {
-                self.wait_until_readable(&destination_key).await?;
+                self.wait_until_readable(&destination_key, digest.size)
+                    .await?;
                 Ok(PutOutcome::Created)
             }
             Err(Error::AlreadyExists { .. } | Error::Precondition { .. }) => {
                 let _ = self.store.delete(&upload_key).await;
-                self.wait_until_readable(&destination_key).await?;
+                self.wait_until_readable(&destination_key, digest.size)
+                    .await?;
                 Ok(PutOutcome::AlreadyExists)
             }
             Err(error) => {
@@ -212,5 +237,21 @@ mod tests {
             PutOutcome::AlreadyExists
         );
         assert_eq!(store.size(&digest).await.unwrap(), Some(10));
+
+        tokio::fs::write(source.path(), b"").await.unwrap();
+        let empty_digest = Digest {
+            algorithm: Algorithm::Sha256.into(),
+            hash: hex::encode(Sha256::digest(b"")),
+            size: 0,
+        };
+        assert_eq!(
+            store.put(&empty_digest, source.path()).await.unwrap(),
+            PutOutcome::Created
+        );
+        assert_eq!(store.size(&empty_digest).await.unwrap(), Some(0));
+        assert_eq!(
+            store.put(&empty_digest, source.path()).await.unwrap(),
+            PutOutcome::AlreadyExists
+        );
     }
 }
