@@ -12,6 +12,12 @@ config:
   storage: s3
   databaseUrl: ""
   databaseMaxConnections: 32
+  azureAccount: ""
+  azureContainer: ""
+  azurePrefix: v1
+  azureCredentialType: auto
+  azureEndpoint: ""
+  azureAllowHttp: false
   s3Bucket: ""
   s3Prefix: v1
   s3Region: us-east-1

@@ -23,11 +23,22 @@ spec:
             - {name: MBX_CACHE_STORAGE, value: {{ .Values.config.storage | quote }}}
             - {name: MBX_CACHE_DATABASE_URL, value: {{ required "config.databaseUrl is required" .Values.config.databaseUrl | quote }}}
             - {name: MBX_CACHE_DATABASE_MAX_CONNECTIONS, value: {{ .Values.config.databaseMaxConnections | quote }}}
+            {{- if eq .Values.config.storage "azure" }}
+            - {name: MBX_CACHE_AZURE_ACCOUNT, value: {{ required "config.azureAccount is required for Azure storage" .Values.config.azureAccount | quote }}}
+            - {name: MBX_CACHE_AZURE_CONTAINER, value: {{ required "config.azureContainer is required for Azure storage" .Values.config.azureContainer | quote }}}
+            - {name: MBX_CACHE_AZURE_PREFIX, value: {{ .Values.config.azurePrefix | quote }}}
+            - {name: MBX_CACHE_AZURE_CREDENTIAL_TYPE, value: {{ .Values.config.azureCredentialType | quote }}}
+            {{- with .Values.config.azureEndpoint }}
+            - {name: MBX_CACHE_AZURE_ENDPOINT, value: {{ . | quote }}}
+            {{- end }}
+            - {name: MBX_CACHE_AZURE_ALLOW_HTTP, value: {{ .Values.config.azureAllowHttp | quote }}}
+            {{- else if eq .Values.config.storage "s3" }}
             - {name: MBX_CACHE_S3_BUCKET, value: {{ required "config.s3Bucket is required" .Values.config.s3Bucket | quote }}}
             - {name: MBX_CACHE_S3_PREFIX, value: {{ .Values.config.s3Prefix | quote }}}
             - {name: MBX_CACHE_S3_REGION, value: {{ .Values.config.s3Region | quote }}}
             - {name: MBX_CACHE_S3_ENDPOINT, value: {{ .Values.config.s3Endpoint | quote }}}
             - {name: MBX_CACHE_S3_PATH_STYLE, value: {{ .Values.config.s3PathStyle | quote }}}
+            {{- end }}
             - {name: MBX_CACHE_MAX_BLOB_BYTES, value: {{ .Values.config.maxBlobBytes | quote }}}
             - name: MBX_CACHE_TOKENS_JSON
               valueFrom: {secretKeyRef: {name: {{ .Values.secret.existingSecret }}, key: {{ .Values.secret.tokensKey }}, optional: true}}

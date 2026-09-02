@@ -14,11 +14,11 @@ services:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: mise_cache
-      POSTGRES_USER: mise_cache
+      POSTGRES_DB: mbx_cache
+      POSTGRES_USER: mbx_cache
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U mise_cache"]
+      test: ["CMD-SHELL", "pg_isready -U mbx_cache"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -63,7 +63,7 @@ services:
     image: prom/prometheus:v3.13.2
     restart: unless-stopped
     labels:
-      dev.mise-cache.config-hash: "${MBX_CACHE_PROMETHEUS_CONFIG_HASH:?MBX_CACHE_PROMETHEUS_CONFIG_HASH is required}"
+      dev.mbx-cache.config-hash: "${MBX_CACHE_PROMETHEUS_CONFIG_HASH:?MBX_CACHE_PROMETHEUS_CONFIG_HASH is required}"
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -87,7 +87,7 @@ services:
     image: grafana/grafana:13.1.3
     restart: unless-stopped
     labels:
-      dev.mise-cache.config-hash: "${MBX_CACHE_GRAFANA_CONFIG_HASH:?MBX_CACHE_GRAFANA_CONFIG_HASH is required}"
+      dev.mbx-cache.config-hash: "${MBX_CACHE_GRAFANA_CONFIG_HASH:?MBX_CACHE_GRAFANA_CONFIG_HASH is required}"
     environment:
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
@@ -112,8 +112,8 @@ services:
       - "127.0.0.1:3000:3000"
     volumes:
       - ./monitoring/grafana/provisioning/datasources/prometheus.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
-      - ./monitoring/grafana/provisioning/dashboards/mise-cache.yml:/etc/grafana/provisioning/dashboards/mise-cache.yml:ro
-      - ./monitoring/grafana/dashboards/mise-cache.json:/etc/grafana/dashboards/mise-cache.json:ro
+      - ./monitoring/grafana/provisioning/dashboards/mbx-cache.yml:/etc/grafana/provisioning/dashboards/mbx-cache.yml:ro
+      - ./monitoring/grafana/dashboards/mbx-cache.json:/etc/grafana/dashboards/mbx-cache.json:ro
     networks: [internal]
 
 networks:

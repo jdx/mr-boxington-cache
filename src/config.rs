@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum StorageKind {
+    Azure,
     Filesystem,
     S3,
 }
@@ -39,12 +40,33 @@ pub struct Config {
 
     /// Sweep metadata older than this many days, then exit without serving.
     ///
-    /// R2 expires the objects themselves through a lifecycle rule, which leaves
+    /// Object storage expires blobs through a lifecycle rule, which leaves
     /// their rows behind. Keep this longer than the lifecycle age so storage
     /// deletes first and metadata follows; the reverse drops rows for objects
     /// that still exist and costs needless recompiles.
     #[arg(long, env = "MBX_CACHE_SWEEP_METADATA_OLDER_THAN_DAYS")]
     pub sweep_metadata_older_than_days: Option<u32>,
+
+    #[arg(long, env = "MBX_CACHE_AZURE_ACCOUNT")]
+    pub azure_account: Option<String>,
+
+    #[arg(long, env = "MBX_CACHE_AZURE_CONTAINER")]
+    pub azure_container: Option<String>,
+
+    #[arg(long, env = "MBX_CACHE_AZURE_PREFIX", default_value = "v1")]
+    pub azure_prefix: String,
+
+    /// Azure credential type. `auto` discovers credentials; production VMs use
+    /// `managed_identity` so no storage key is present in the service environment.
+    #[arg(long, env = "MBX_CACHE_AZURE_CREDENTIAL_TYPE", default_value = "auto")]
+    pub azure_credential_type: String,
+
+    /// Override the Azure Blob endpoint, primarily for compatible emulators.
+    #[arg(long, env = "MBX_CACHE_AZURE_ENDPOINT")]
+    pub azure_endpoint: Option<String>,
+
+    #[arg(long, env = "MBX_CACHE_AZURE_ALLOW_HTTP", default_value_t = false)]
+    pub azure_allow_http: bool,
 
     #[arg(long, env = "MBX_CACHE_S3_BUCKET")]
     pub s3_bucket: Option<String>,

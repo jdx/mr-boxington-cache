@@ -81,13 +81,11 @@ jobs:
       contents: read
       id-token: write
     env:
-      CACHE_URL: https://cache.mise.jdx.dev
-      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
-      # The stored secret keeps its original name; it cannot easily be
-      # recreated, so the rebrand deliberately did not rename it.
-      MBX_CACHE_DATABASE_PASSWORD: ${{ secrets.MISE_CACHE_DATABASE_PASSWORD }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      CACHE_URL: https://cache.jdx.dev
+      AZURE_SSH_HOST: ${{ vars.AZURE_SSH_HOST }}
+      AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+      AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER || 'cache' }}
+      MBX_CACHE_DATABASE_PASSWORD: ${{ secrets.MBX_CACHE_DATABASE_PASSWORD }}
       TS_AUDIENCE: ${{ secrets.TS_AUDIENCE }}
       TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
     steps:
@@ -95,10 +93,9 @@ jobs:
         run: |
           missing=()
           for name in \
-            CLOUDFLARE_ACCOUNT_ID \
+            AZURE_SSH_HOST \
+            AZURE_STORAGE_ACCOUNT \
             MBX_CACHE_DATABASE_PASSWORD \
-            R2_ACCESS_KEY_ID \
-            R2_SECRET_ACCESS_KEY \
             TS_AUDIENCE \
             TS_OAUTH_CLIENT_ID; do
             if [ -z "${!name}" ]; then
@@ -109,8 +106,8 @@ jobs:
             printf '::error::Missing production configuration: %s\n' "${missing[*]}"
             exit 1
           fi
-          if [[ ! "$CLOUDFLARE_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]]; then
-            echo '::error::CLOUDFLARE_ACCOUNT_ID must be a 32-character lowercase hexadecimal account ID'
+          if [[ ! "$AZURE_STORAGE_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]]; then
+            echo '::error::AZURE_STORAGE_ACCOUNT must contain 3-24 lowercase letters and digits'
             exit 1
           fi
 
@@ -119,27 +116,20 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
-        with:
-          terraform_version: 1.14.9
-
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           version: 2026.8.2
           install: false
           cache: false
 
-      # The tailnet tag and the host's MagicDNS name are pre-rebrand identifiers
-      # that live in Tailscale, not in this repository. See "Names that predate
-      # the rebrand" in deploy/ovh/README.md before changing either.
       - name: Join the deployment tailnet
         id: tailnet
         uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4.1.3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           audience: ${{ secrets.TS_AUDIENCE }}
-          tags: tag:mise-cache-ci
-          ping: mise-cache-prod.tail13c301.ts.net
+          tags: tag:mbx-cache-ci
+          ping: ${{ vars.AZURE_SSH_HOST }}
 
       # Tailscale refuses the exchange when the trust credential's Subject does
       # not match the claim GitHub actually sends, and that claim appears in no
@@ -175,29 +165,17 @@ jobs:
           echo 'Joining a tailnet also needs write on the auth_keys scope and the'
           echo 'tag the workflow advertises.'
 
-      - name: Configure deployment outputs
-        env:
-          TF_VAR_cloudflare_account_id: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-          TF_VAR_domain: cache.mise.jdx.dev
-          TF_VAR_existing_server_ipv4: 15.204.81.200
-          # Existing bucket; the R2 token is scoped to this exact name.
-          TF_VAR_r2_bucket: mise-cache-production
-        run: |
-          terraform -chdir=deploy/ovh/terraform init -backend=false -input=false
-          terraform -chdir=deploy/ovh/terraform apply -auto-approve -input=false
-
       - name: Deploy immutable image
         env:
           MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF: jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main
           MBX_CACHE_IMAGE: ${{ format('ghcr.io/jdx/mbx-cache@{0}', needs.image.outputs.digest) }}
-          OVH_SSH_HOST: mise-cache-prod.tail13c301.ts.net
         run: |
-          OVH_SSH_SOURCE_CIDR="$(tailscale ip -4)/32"
-          export OVH_SSH_SOURCE_CIDR
-          ./deploy/ovh/deploy.sh \
+          AZURE_SSH_SOURCE_CIDR="$(tailscale ip -4)/32"
+          export AZURE_SSH_SOURCE_CIDR
+          ./deploy/azure/deploy.sh \
             --ssh-option=StrictHostKeyChecking=accept-new
 
-      - name: Qualify OIDC, PostgreSQL, and R2
+      - name: Qualify OIDC, PostgreSQL, and Azure Blob Storage
         env:
           CACHE_NAMESPACE: jdx/mr-boxington-cache
         run: |
@@ -211,7 +189,9 @@ jobs:
 
           temporary_dir=$(mktemp -d "${RUNNER_TEMP}/mbx-cache-qualification.XXXXXXXX")
           trap 'rm -rf -- "$temporary_dir"' EXIT
-          printf 'mbx-cache production qualification %s\n' "$GITHUB_SHA" >"$temporary_dir/input"
+          printf 'mbx-cache production qualification %s %s %s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            >"$temporary_dir/input"
           digest=$(sha256sum "$temporary_dir/input" | cut -d ' ' -f 1)
           size=$(wc -c <"$temporary_dir/input")
           blob_url="$CACHE_URL/v1/blobs/sha256/$digest/$size"

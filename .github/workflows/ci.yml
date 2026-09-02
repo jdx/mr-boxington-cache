@@ -20,24 +20,14 @@ jobs:
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: 1.14.9
-      - run: terraform -chdir=deploy/ovh/terraform fmt -check -recursive
-      - run: terraform -chdir=deploy/ovh/terraform init -backend=false
-      - run: terraform -chdir=deploy/ovh/terraform validate
-      - name: Plan existing-server deployment without provider credentials
-        run: |
-          terraform -chdir=deploy/ovh/terraform plan \
-            -input=false \
-            -lock=false \
-            -refresh=false \
-            -var='domain=cache.mise.jdx.dev' \
-            -var='cloudflare_account_id=0123456789abcdef0123456789abcdef' \
-            -var='r2_bucket=mbx-cache-production' \
-            -var='existing_server_ipv4=203.0.113.10'
+      - run: terraform -chdir=deploy/azure/terraform fmt -check -recursive
+      - run: terraform -chdir=deploy/azure/terraform init -backend=false
+      - run: terraform -chdir=deploy/azure/terraform validate
       - name: Validate bootstrap plan
         run: |
-          install -d -m 0700 deploy/ovh/bootstrap/runtime
-          install -m 0600 deploy/ovh/bootstrap/runtime.env.example deploy/ovh/bootstrap/runtime/.env
-          install -m 0600 deploy/ovh/bootstrap/cache.env.example deploy/ovh/bootstrap/runtime/cache.env
+          install -d -m 0700 deploy/azure/bootstrap/runtime
+          install -m 0600 deploy/azure/bootstrap/runtime.env.example deploy/azure/bootstrap/runtime/.env
+          install -m 0600 deploy/azure/bootstrap/cache.env.example deploy/azure/bootstrap/runtime/cache.env
           printf '%s\n' \
             '[[bootstrap.linux.firewall.rules]]' \
             'name = "ssh-admin"' \
@@ -46,16 +36,16 @@ jobs:
             'port = 22' \
             'protocol = "tcp"' \
             'source = "203.0.113.10/32"' \
-            >deploy/ovh/bootstrap/mise.local.toml
+            >deploy/azure/bootstrap/mise.local.toml
           SSH_CONNECTION="203.0.113.10 54321 192.0.2.10 22" \
-            MISE_TRUSTED_CONFIG_PATHS="$PWD/deploy/ovh/bootstrap" \
-            mise --cd deploy/ovh/bootstrap bootstrap plan --json >/dev/null
+            MISE_TRUSTED_CONFIG_PATHS="$PWD/deploy/azure/bootstrap" \
+            mise --cd deploy/azure/bootstrap bootstrap plan --json >/dev/null
       - name: Validate Compose and dashboard configuration
-        working-directory: deploy/ovh/bootstrap
+        working-directory: deploy/azure/bootstrap
         run: |
           install -m 0600 cache.env.example cache.env
           docker compose --env-file runtime.env.example config --quiet
-          jq empty monitoring/grafana/dashboards/mise-cache.json
+          jq empty monitoring/grafana/dashboards/mbx-cache.json
       - name: Validate the Helm chart
         run: |
           base=(--set config.databaseUrl=postgres://cache/cache --set config.s3Bucket=cache)
@@ -80,12 +70,17 @@ jobs:
           check custom custom --set serviceAccount.name=custom
           check none existing --set serviceAccount.create=false --set serviceAccount.name=existing
           check none default --set serviceAccount.create=false
-      - run: shellcheck deploy/ovh/deploy.sh deploy/ovh/test-deploy.sh
-      - run: deploy/ovh/test-deploy.sh
+          helm template azure charts/mbx-cache \
+            --set config.storage=azure \
+            --set config.databaseUrl=postgres://cache/cache \
+            --set config.azureAccount=mbxcache \
+            --set config.azureContainer=cache >/dev/null
+      - run: shellcheck deploy/azure/deploy.sh deploy/azure/test-deploy.sh
+      - run: deploy/azure/test-deploy.sh
   test:
     runs-on: ubuntu-latest
-    # The PostgreSQL metadata store is the production backend, so the tests run
-    # against a real server rather than only the in-memory store.
+    # Production uses PostgreSQL and Azure Blob Storage, so CI exercises both
+    # real protocols rather than only their in-memory stand-ins.
     services:
       postgres:
         image: postgres:17-alpine
@@ -101,6 +96,7 @@ jobs:
           --health-timeout 5s
           --health-retries 15
     env:
+      MBX_CACHE_TEST_AZURITE: "1"
       MBX_CACHE_TEST_DATABASE_URL: postgres://cache:cache@127.0.0.1:5432/cache
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -110,6 +106,21 @@ jobs:
         with:
           components: "rustfmt, clippy"
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Create the Azurite test container
+        env:
+          AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
+        run: |
+          docker run --detach --name mbx-cache-azurite \
+            --publish 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite:3.35.0 \
+            azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+          for attempt in {1..20}; do
+            if az storage container create --name cache --output none; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features

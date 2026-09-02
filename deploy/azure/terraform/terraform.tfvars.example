@@ -1,0 +1,6 @@
+storage_account_name = "replacewithgloballyuniquename"
+public_ssh_key        = "ssh-ed25519 AAAA... operator@example"
+
+# Set this to the operator's public IP only for initial bootstrap, then remove
+# it after enrolling the VM in Tailscale and apply again.
+# admin_source_cidr = "203.0.113.10/32"
