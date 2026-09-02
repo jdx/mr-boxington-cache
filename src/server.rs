@@ -955,7 +955,7 @@ fn validate_action_result_shape(
         && (result.metadata.is_none() || result.output_root.is_none())
     {
         return Err(ApiError::unprocessable(
-            "rustc action results require metadata and an output root",
+            "compiler action results require metadata and an output root",
         ));
     }
     Ok(())
