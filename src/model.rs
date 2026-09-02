@@ -1,7 +1,9 @@
 #[cfg(test)]
 pub use mbx_cache_protocol::ActionPrediction as TaskActionPrediction;
 pub use mbx_cache_protocol::DigestAlgorithm as Algorithm;
-pub use mbx_cache_protocol::{ActionResult, Digest, Directory, RustcMetadata, TaskActionManifest};
+pub use mbx_cache_protocol::{
+    ActionResult, CcMetadata, Digest, Directory, RustcMetadata, TaskActionManifest,
+};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 
@@ -137,6 +139,73 @@ pub struct RustcLinkerIdentity {
     pub sdk: Option<String>,
     #[serde(default)]
     pub deployment_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CcAction {
+    pub version: u8,
+    pub kind: String,
+    pub adapter_version: u8,
+    #[serde(default)]
+    pub assembly_input_model: Option<u8>,
+    pub compiler: CcCompiler,
+    pub arguments: Vec<String>,
+    pub environment: BTreeMap<String, Option<String>>,
+    pub inputs: Vec<CcInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CcCompiler {
+    pub assembler: String,
+    pub family: String,
+    pub target: String,
+    pub version_text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CcInput {
+    pub digest: Digest,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildScriptAction {
+    pub version: u8,
+    pub kind: String,
+    pub binary_action: Digest,
+    pub cargo_environment: BTreeMap<String, Option<String>>,
+    pub environment: BTreeMap<String, Option<String>>,
+    pub inputs: BTreeMap<String, BuildScriptInput>,
+    pub out_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BuildScriptInput {
+    Missing,
+    File {
+        digest: Digest,
+    },
+    Directory {
+        digest: Digest,
+    },
+    Symlink {
+        target: String,
+        referent: Box<BuildScriptInput>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildScriptMetadata {
+    pub version: u8,
+    pub kind: String,
+    pub stdout: Digest,
+    pub stderr: Digest,
 }
 
 fn valid_string(value: &str) -> bool {
@@ -275,6 +344,92 @@ impl RustcLinkerIdentity {
                 .as_deref()
                 .is_none_or(|value| !value.is_empty() && valid_string(value))
     }
+}
+
+impl CcAction {
+    pub fn validate(&self) -> bool {
+        let mut input_paths = HashSet::new();
+        self.version == 1
+            && self.kind == "cc"
+            && self.adapter_version > 0
+            && self.assembly_input_model.is_none_or(|version| version == 1)
+            && self.compiler.validate()
+            && valid_strings(&self.arguments)
+            && valid_optional_string_map(&self.environment)
+            && !self.inputs.is_empty()
+            && self
+                .inputs
+                .iter()
+                .all(|input| input.validate() && input_paths.insert(&input.path))
+    }
+}
+
+impl CcCompiler {
+    fn validate(&self) -> bool {
+        [
+            &self.assembler,
+            &self.family,
+            &self.target,
+            &self.version_text,
+        ]
+        .into_iter()
+        .all(|value| !value.is_empty() && valid_string(value))
+    }
+}
+
+impl CcInput {
+    fn validate(&self) -> bool {
+        // System headers are intentionally left as host paths, and include
+        // manifests use an adapter-owned prefix. These are key inputs rather
+        // than paths the server reads, so only their serialized integrity is
+        // relevant here.
+        !self.path.is_empty() && valid_string(&self.path) && self.digest.validate().is_ok()
+    }
+}
+
+impl BuildScriptAction {
+    pub fn validate(&self) -> bool {
+        self.version == 2
+            && self.kind == "build-script"
+            && self.binary_action.validate().is_ok()
+            && valid_optional_string_map(&self.cargo_environment)
+            && valid_optional_string_map(&self.environment)
+            && self
+                .inputs
+                .iter()
+                .all(|(path, input)| valid_string(path) && !path.is_empty() && input.validate(0))
+            && self.out_dir.as_deref().is_none_or(valid_string)
+    }
+}
+
+impl BuildScriptInput {
+    fn validate(&self, depth: usize) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        match self {
+            Self::Missing => true,
+            Self::File { digest } | Self::Directory { digest } => digest.validate().is_ok(),
+            Self::Symlink { target, referent } => {
+                valid_string(target) && referent.validate(depth + 1)
+            }
+        }
+    }
+}
+
+impl BuildScriptMetadata {
+    pub fn validate(&self) -> bool {
+        self.version == 1
+            && self.kind == "build-script"
+            && self.stdout.validate().is_ok()
+            && self.stderr.validate().is_ok()
+    }
+}
+
+fn valid_optional_string_map(values: &BTreeMap<String, Option<String>>) -> bool {
+    values.iter().all(|(key, value)| {
+        !key.is_empty() && valid_string(key) && value.as_deref().is_none_or(valid_string)
+    })
 }
 
 fn valid_normalized_path(path: &str) -> bool {
