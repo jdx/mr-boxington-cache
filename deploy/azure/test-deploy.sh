@@ -57,6 +57,9 @@ grep -Fq 'MBX_CACHE_AZURE_ACCOUNT="mbxcachetest"' "$project_dir/runtime/cache.en
 grep -Fq 'MBX_CACHE_AZURE_CONTAINER="cache"' "$project_dir/runtime/cache.env"
 grep -Fq 'MBX_CACHE_AZURE_CREDENTIAL_TYPE="managed_identity"' "$project_dir/runtime/cache.env"
 oidc_json=$(sed -n 's/^MBX_CACHE_OIDC_PROVIDERS_JSON=//p' "$project_dir/runtime/cache.env" | jq -c fromjson)
+anonymous_read_namespaces=$(sed -n 's/^MBX_CACHE_ANONYMOUS_READ_NAMESPACES_JSON=//p' "$project_dir/runtime/cache.env" | jq -c fromjson)
+jq -e --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" '$repositories == .' \
+  <<<"$anonymous_read_namespaces" >/dev/null
 jq -e \
   --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" \
   --arg deployment_run_attempt "${MBX_CACHE_TEST_DEPLOY_RUN_ATTEMPT:?}" \

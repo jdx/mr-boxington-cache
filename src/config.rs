@@ -94,6 +94,14 @@ pub struct Config {
     #[arg(long, env = "MBX_CACHE_ALLOW_ANONYMOUS", default_value_t = false)]
     pub allow_anonymous: bool,
 
+    /// JSON array of namespace patterns that may be read without authentication.
+    #[arg(
+        long,
+        env = "MBX_CACHE_ANONYMOUS_READ_NAMESPACES_JSON",
+        hide_env_values = true
+    )]
+    pub anonymous_read_namespaces_json: Option<String>,
+
     #[arg(long, env = "MBX_CACHE_MAX_BLOB_BYTES", default_value_t = 5 * 1024 * 1024 * 1024_u64)]
     pub max_blob_bytes: u64,
 }

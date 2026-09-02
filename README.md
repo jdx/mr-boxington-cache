@@ -102,6 +102,7 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_TOKENS_JSON` | — | Token grants, described below |
 | `MBX_CACHE_OIDC_PROVIDERS_JSON` | — | Trusted OIDC providers and claim grants, described below |
 | `MBX_CACHE_ALLOW_ANONYMOUS` | `false` | Allow access without configured grants |
+| `MBX_CACHE_ANONYMOUS_READ_NAMESPACES_JSON` | — | Namespace patterns that may be read without authentication; anonymous writes are always denied |
 | `MBX_CACHE_MAX_BLOB_BYTES` | `5368709120` | Maximum upload size |
 
 AWS credentials use the standard AWS SDK credential chain, including environment variables, workload identity, ECS, and EC2 roles.
@@ -111,6 +112,13 @@ deployment uses the VM's managed identity and stores no account key.
 ### Authorization
 
 `MBX_CACHE_TOKENS_JSON` is an array of grants. Namespace patterns may be an exact name, `*`, or a prefix ending in `/*`.
+
+For a deliberately public read-only cache, set
+`MBX_CACHE_ANONYMOUS_READ_NAMESPACES_JSON` to a JSON array of exact namespaces
+or prefix patterns such as `["jdx/mise", "public/*"]`. Unauthenticated requests
+may read matching namespaces, but every write still requires a token or OIDC
+identity with an explicit write grant. This can be combined with authenticated
+grants; unlike `MBX_CACHE_ALLOW_ANONYMOUS`, it never permits anonymous writes.
 
 ```json
 [

@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
             config.tokens_json.as_deref(),
             config.oidc_providers_json.as_deref(),
             config.allow_anonymous,
+            config.anonymous_read_namespaces_json.as_deref(),
         )
         .await?,
         config.max_blob_bytes,
