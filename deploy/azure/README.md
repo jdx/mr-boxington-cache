@@ -16,7 +16,8 @@ All new resources use the `mbx-cache` name. The public endpoint is
   virtual machines, role assignments, and storage accounts;
 - Azure CLI, Terraform 1.8 or newer, mise 2026.8.2 or newer, `curl`, `jq`,
   `ssh`, and `tailscale`;
-- a remote encrypted Terraform backend for production state;
+- access to the `mbxcachetfstate` Azure Storage account used by the checked-in
+  remote backend;
 - an SSH public key; and
 - a published mbx-cache image pinned by digest.
 
@@ -39,8 +40,10 @@ terraform plan
 terraform apply
 ```
 
-Keep production state in a remote encrypted backend. Local state and
-`terraform.tfvars` are ignored by Git.
+Production state is encrypted at rest in the private `tfstate` container of
+the `mbxcachetfstate` Azure Storage account. The backend authenticates with
+Microsoft Entra ID; operators need `Storage Blob Data Contributor` access to
+that container. Local state and `terraform.tfvars` are ignored by Git.
 
 For initial setup only, set `admin_source_cidr` to the operator's public `/32`.
 Terraform otherwise exposes only HTTP and HTTPS. The host firewall independently
