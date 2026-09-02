@@ -36,7 +36,7 @@ stored in GitHub.
    release. A second container build is not run for the release.
 
 The image reference in `container-image.txt` is the value to use for
-`MBX_CACHE_IMAGE` in the OVH deployment.
+`MBX_CACHE_IMAGE` in the Azure deployment.
 
 ## Recovery
 

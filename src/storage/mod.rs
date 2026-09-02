@@ -1,3 +1,4 @@
+mod azure;
 mod filesystem;
 mod s3;
 
@@ -11,6 +12,7 @@ use crate::{
     model::Digest,
 };
 
+pub use azure::AzureStore;
 pub use filesystem::FilesystemStore;
 pub use s3::S3Store;
 
@@ -36,6 +38,7 @@ pub trait BlobStore: Send + Sync {
 
 pub async fn from_config(config: &Config) -> anyhow::Result<std::sync::Arc<dyn BlobStore>> {
     Ok(match config.storage {
+        StorageKind::Azure => std::sync::Arc::new(AzureStore::new(config).await?),
         StorageKind::Filesystem => {
             std::sync::Arc::new(FilesystemStore::new(&config.data_dir).await?)
         }

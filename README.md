@@ -25,12 +25,13 @@ this README carries the implementation and operations detail beyond it.
 - BLAKE3 and SHA-256 content-addressed storage
 - Filesystem storage for a single-node installation
 - S3-compatible storage for production, including MinIO
+- Azure Blob Storage with managed-identity authentication
 - In-memory metadata for development or PostgreSQL for durable, horizontally scalable deployments
 - Static and OIDC bearer authorization with per-namespace read/write grants
 - Recursive output-tree validation before an action result becomes visible
 - Typed action and client-metadata validation with kind negotiation
 - Batch missing-blob queries, streaming blob packs, and Prometheus metrics
-- Docker Compose, Helm, and Terraform-managed OVH deployments
+- Docker Compose, Helm, and Terraform-managed Azure deployments
 
 ## Quick start
 
@@ -83,10 +84,16 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | Environment variable | Default | Purpose |
 |---|---:|---|
 | `MBX_CACHE_LISTEN` | `0.0.0.0:8080` | Listen address |
-| `MBX_CACHE_STORAGE` | `filesystem` | `filesystem` or `s3` |
+| `MBX_CACHE_STORAGE` | `filesystem` | `filesystem`, `s3`, or `azure` |
 | `MBX_CACHE_DATA_DIR` | `/var/lib/mbx-cache` | Filesystem blob root |
 | `MBX_CACHE_DATABASE_URL` | `memory://` | PostgreSQL URL or development memory store |
 | `MBX_CACHE_DATABASE_MAX_CONNECTIONS` | `32` | Maximum concurrent PostgreSQL metadata connections |
+| `MBX_CACHE_AZURE_ACCOUNT` | — | Required Azure Storage account name |
+| `MBX_CACHE_AZURE_CONTAINER` | — | Required Azure Blob container name |
+| `MBX_CACHE_AZURE_PREFIX` | `v1` | Azure object-key prefix |
+| `MBX_CACHE_AZURE_CREDENTIAL_TYPE` | `auto` | Azure credential discovery mode; use `managed_identity` on Azure VMs |
+| `MBX_CACHE_AZURE_ENDPOINT` | Azure default | Override for compatible emulators |
+| `MBX_CACHE_AZURE_ALLOW_HTTP` | `false` | Allow an HTTP emulator endpoint |
 | `MBX_CACHE_S3_BUCKET` | — | Required for S3 storage |
 | `MBX_CACHE_S3_PREFIX` | `v1` | Object-key prefix |
 | `MBX_CACHE_S3_ENDPOINT` | AWS default | S3-compatible endpoint |
@@ -98,6 +105,8 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_MAX_BLOB_BYTES` | `5368709120` | Maximum upload size |
 
 AWS credentials use the standard AWS SDK credential chain, including environment variables, workload identity, ECS, and EC2 roles.
+Azure credentials are discovered by the object-store client. The production
+deployment uses the VM's managed identity and stores no account key.
 
 ### Authorization
 
@@ -218,9 +227,9 @@ Treat the output as a secret even though it is short-lived. Set the audience in 
 
 - `docker-compose.yml` runs a local development stack with PostgreSQL and MinIO.
 - `charts/mbx-cache` runs a horizontally scalable Kubernetes deployment.
-- [`deploy/ovh`](deploy/ovh/README.md) provisions a low-cost US production
+- [`deploy/azure`](deploy/azure/README.md) provisions a low-cost US production
   instance with Terraform and converges its host with `mise bootstrap remote`.
-  Cache blobs use Cloudflare R2.
+  Cache blobs use Azure Blob Storage in the same region.
 
 ## API
 
@@ -266,7 +275,9 @@ lifecycle so objects go first — reversed, it removes rows for objects that sti
 exist and turns cache hits into recompiles. A dangling reference is never fatal:
 a client that cannot fetch a blob treats the action as a miss.
 
-Run multiple stateless replicas against the same PostgreSQL database and S3 bucket. Readiness and liveness probes use `/v1/status`. Scrape `/metrics` with Prometheus.
+Run multiple stateless replicas against the same PostgreSQL database and object
+store. Readiness and liveness probes use `/v1/status`. Scrape `/metrics` with
+Prometheus.
 
 The OpenMetrics endpoint exposes the existing action and blob counters plus detailed blob-pack telemetry:
 

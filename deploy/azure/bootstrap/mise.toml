@@ -8,37 +8,37 @@ min_version = "2026.8.2"
 "apt:nftables" = "latest"
 "apt:unattended-upgrades" = "latest"
 
-[bootstrap.directories."/opt/mise-cache"]
+[bootstrap.directories."/opt/mbx-cache"]
 owner = "root"
 group = "root"
 mode = "0750"
 
-[bootstrap.directories."/opt/mise-cache/monitoring"]
+[bootstrap.directories."/opt/mbx-cache/monitoring"]
 owner = "root"
 group = "root"
 mode = "0755"
 
-[bootstrap.directories."/opt/mise-cache/monitoring/grafana"]
+[bootstrap.directories."/opt/mbx-cache/monitoring/grafana"]
 owner = "root"
 group = "root"
 mode = "0755"
 
-[bootstrap.directories."/opt/mise-cache/monitoring/grafana/dashboards"]
+[bootstrap.directories."/opt/mbx-cache/monitoring/grafana/dashboards"]
 owner = "root"
 group = "root"
 mode = "0755"
 
-[bootstrap.directories."/opt/mise-cache/monitoring/grafana/provisioning"]
+[bootstrap.directories."/opt/mbx-cache/monitoring/grafana/provisioning"]
 owner = "root"
 group = "root"
 mode = "0755"
 
-[bootstrap.directories."/opt/mise-cache/monitoring/grafana/provisioning/dashboards"]
+[bootstrap.directories."/opt/mbx-cache/monitoring/grafana/provisioning/dashboards"]
 owner = "root"
 group = "root"
 mode = "0755"
 
-[bootstrap.directories."/opt/mise-cache/monitoring/grafana/provisioning/datasources"]
+[bootstrap.directories."/opt/mbx-cache/monitoring/grafana/provisioning/datasources"]
 owner = "root"
 group = "root"
 mode = "0755"
@@ -52,7 +52,7 @@ owner = "root"
 group = "root"
 mode = "0644"
 
-[bootstrap.files."/etc/fail2ban/jail.d/mise-cache.conf"]
+[bootstrap.files."/etc/fail2ban/jail.d/mbx-cache.conf"]
 content = '''
 [sshd]
 enabled = true
@@ -66,43 +66,43 @@ group = "root"
 mode = "0644"
 notify = ["fail2ban"]
 
-[bootstrap.files."/opt/mise-cache/compose.yaml"]
+[bootstrap.files."/opt/mbx-cache/compose.yaml"]
 source = "./compose.yaml"
 owner = "root"
 group = "root"
 mode = "0644"
 
-[bootstrap.files."/opt/mise-cache/.env"]
+[bootstrap.files."/opt/mbx-cache/.env"]
 source = "./runtime/.env"
 owner = "root"
 group = "root"
 mode = "0600"
 
-[bootstrap.files."/opt/mise-cache/cache.env"]
+[bootstrap.files."/opt/mbx-cache/cache.env"]
 source = "./runtime/cache.env"
 owner = "root"
 group = "root"
 mode = "0600"
 
-[bootstrap.files."/opt/mise-cache/monitoring/prometheus.yml"]
+[bootstrap.files."/opt/mbx-cache/monitoring/prometheus.yml"]
 source = "./monitoring/prometheus.yml"
 owner = "root"
 group = "root"
 mode = "0644"
 
-[bootstrap.files."/opt/mise-cache/monitoring/grafana/dashboards/mise-cache.json"]
-source = "./monitoring/grafana/dashboards/mise-cache.json"
+[bootstrap.files."/opt/mbx-cache/monitoring/grafana/dashboards/mbx-cache.json"]
+source = "./monitoring/grafana/dashboards/mbx-cache.json"
 owner = "root"
 group = "root"
 mode = "0644"
 
-[bootstrap.files."/opt/mise-cache/monitoring/grafana/provisioning/dashboards/mise-cache.yml"]
-source = "./monitoring/grafana/provisioning/dashboards/mise-cache.yml"
+[bootstrap.files."/opt/mbx-cache/monitoring/grafana/provisioning/dashboards/mbx-cache.yml"]
+source = "./monitoring/grafana/provisioning/dashboards/mbx-cache.yml"
 owner = "root"
 group = "root"
 mode = "0644"
 
-[bootstrap.files."/opt/mise-cache/monitoring/grafana/provisioning/datasources/prometheus.yml"]
+[bootstrap.files."/opt/mbx-cache/monitoring/grafana/provisioning/datasources/prometheus.yml"]
 source = "./monitoring/grafana/provisioning/datasources/prometheus.yml"
 owner = "root"
 group = "root"
@@ -158,11 +158,11 @@ protocol = "tcp"
 source = "100.64.0.0/10"
 interface = "tailscale0"
 
-[bootstrap.compose.mise-cache]
-project_dir = "/opt/mise-cache"
+[bootstrap.compose.mbx-cache]
+project_dir = "/opt/mbx-cache"
 files = ["compose.yaml"]
 env_files = [".env"]
-project_name = "mise-cache"
+project_name = "mbx-cache"
 state = "running"
 pull = "missing"
 wait = true
