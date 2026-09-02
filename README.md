@@ -264,7 +264,7 @@ Servers advertising `features.blob_pack_uploads` accept the same framing in the 
 
 Servers advertising `features.action_batch` answer `POST /v1/action-results:batch`, which takes the same digest-list JSON as `blobs:missing` and returns `application/vnd.mbx.cache-action-result-batch.v1+json`. The response carries only the results this namespace holds, in no particular order and at most once each, so clients bind each record to its request by the action digest inside it rather than by position. The request is bounded by `limits.max_batch_items`.
 
-`GET /v1/capabilities` advertises the action kinds and exact schema versions accepted by the server. Action-result keys use BLAKE3. Version 1 accepts task and rustc action and metadata schema version 1. Rustc results require an output directory tree plus metadata referencing raw stdout and stderr blobs so clients can replay compiler diagnostics byte-for-byte.
+`GET /v1/capabilities` advertises the action kinds and exact schema versions accepted by the server. Action-result keys use BLAKE3. The server accepts task, rustc, and cc action schema version 1, build-script action schema version 2, and metadata schema version 1 for every kind. Rustc, cc, and build-script results require an output directory tree plus metadata referencing raw stdout and stderr blobs so clients can replay diagnostics byte-for-byte.
 
 ## Operations
 

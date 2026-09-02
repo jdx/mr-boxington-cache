@@ -151,6 +151,8 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
     capabilities.digest_algorithms = vec!["blake3".into(), "sha256".into()];
     capabilities.compressors = vec!["identity".into(), "zstd".into()];
     capabilities.action_kinds = BTreeMap::from([
+        ("build-script".into(), ActionKindCapability::new(2, 1)),
+        ("cc".into(), ActionKindCapability::new(1, 1)),
         ("rustc".into(), ActionKindCapability::new(1, 1)),
         ("task".into(), ActionKindCapability::new(1, 1)),
     ]);
@@ -939,6 +941,8 @@ async fn validate_tree(state: &AppState, namespace: &str, root: &Digest) -> Resu
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActionKind {
+    BuildScript,
+    Cc,
     Rustc,
     Task,
 }
@@ -947,11 +951,11 @@ fn validate_action_result_shape(
     result: &ActionResult,
     action_kind: ActionKind,
 ) -> Result<(), ApiError> {
-    if action_kind == ActionKind::Rustc
+    if action_kind != ActionKind::Task
         && (result.metadata.is_none() || result.output_root.is_none())
     {
         return Err(ApiError::unprocessable(
-            "rustc action results require metadata and an output root",
+            "compiler action results require metadata and an output root",
         ));
     }
     Ok(())
@@ -976,12 +980,49 @@ async fn validate_action_descriptor(
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| ApiError::unprocessable("action descriptor version is required"))?;
     match kind.as_str() {
+        "build-script" => validate_build_script_action(value, version),
+        "cc" => validate_cc_action(value, version),
         "task" => validate_task_action(value, version),
         "rustc" => validate_rustc_action(value, version),
         _ => Err(ApiError::unprocessable(format!(
             "unsupported action kind {kind:?}"
         ))),
     }
+}
+
+fn validate_build_script_action(
+    value: serde_json::Value,
+    version: u64,
+) -> Result<ActionKind, ApiError> {
+    if version != 2 {
+        return Err(ApiError::unprocessable(format!(
+            "unsupported build-script action schema {version}"
+        )));
+    }
+    let action =
+        serde_json::from_value::<crate::model::BuildScriptAction>(value).map_err(|error| {
+            ApiError::unprocessable(format!("invalid build-script action: {error}"))
+        })?;
+    if !action.validate() {
+        return Err(ApiError::unprocessable(
+            "invalid build-script action values",
+        ));
+    }
+    Ok(ActionKind::BuildScript)
+}
+
+fn validate_cc_action(value: serde_json::Value, version: u64) -> Result<ActionKind, ApiError> {
+    if version != 1 {
+        return Err(ApiError::unprocessable(format!(
+            "unsupported cc action schema {version}"
+        )));
+    }
+    let action = serde_json::from_value::<crate::model::CcAction>(value)
+        .map_err(|error| ApiError::unprocessable(format!("invalid cc action: {error}")))?;
+    if !action.validate() {
+        return Err(ApiError::unprocessable("invalid cc action values"));
+    }
+    Ok(ActionKind::Cc)
 }
 
 fn validate_task_action(value: serde_json::Value, version: u64) -> Result<ActionKind, ApiError> {
@@ -1057,6 +1098,8 @@ async fn validate_client_metadata(
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| ApiError::unprocessable("client metadata version is required"))?;
     let expected_kind = match action_kind {
+        ActionKind::BuildScript => "build-script",
+        ActionKind::Cc => "cc",
         ActionKind::Rustc => "rustc",
         ActionKind::Task => "task",
     };
@@ -1067,8 +1110,61 @@ async fn validate_client_metadata(
     }
     match action_kind {
         ActionKind::Task => validate_task_metadata(value, version),
+        ActionKind::BuildScript => {
+            validate_build_script_metadata(state, namespace, value, version).await
+        }
+        ActionKind::Cc => validate_cc_metadata(state, namespace, value, version).await,
         ActionKind::Rustc => validate_rustc_metadata(state, namespace, value, version).await,
     }
+}
+
+async fn validate_build_script_metadata(
+    state: &AppState,
+    namespace: &str,
+    value: serde_json::Value,
+    version: u64,
+) -> Result<(), ApiError> {
+    if version != 1 {
+        return Err(ApiError::unprocessable(format!(
+            "unsupported build-script metadata schema {version}"
+        )));
+    }
+    let metadata: crate::model::BuildScriptMetadata =
+        serde_json::from_value(value).map_err(|error| {
+            ApiError::unprocessable(format!("invalid build-script metadata: {error}"))
+        })?;
+    if !metadata.validate() {
+        return Err(ApiError::unprocessable(
+            "invalid build-script metadata values",
+        ));
+    }
+    require_output_blobs(
+        state,
+        namespace,
+        &metadata.stdout,
+        &metadata.stderr,
+        "build-script",
+    )
+    .await
+}
+
+async fn validate_cc_metadata(
+    state: &AppState,
+    namespace: &str,
+    value: serde_json::Value,
+    version: u64,
+) -> Result<(), ApiError> {
+    if version != 1 {
+        return Err(ApiError::unprocessable(format!(
+            "unsupported cc metadata schema {version}"
+        )));
+    }
+    let metadata: crate::model::CcMetadata = serde_json::from_value(value)
+        .map_err(|error| ApiError::unprocessable(format!("invalid cc metadata: {error}")))?;
+    if !metadata.validate() {
+        return Err(ApiError::unprocessable("invalid cc metadata values"));
+    }
+    require_output_blobs(state, namespace, &metadata.stdout, &metadata.stderr, "cc").await
 }
 
 fn validate_task_metadata(value: serde_json::Value, version: u64) -> Result<(), ApiError> {
@@ -1104,9 +1200,25 @@ async fn validate_rustc_metadata(
     if !metadata.validate() {
         return Err(ApiError::unprocessable("invalid rustc metadata values"));
     }
-    require_blob(state, namespace, &metadata.stdout, "rustc stdout blob").await?;
-    require_blob(state, namespace, &metadata.stderr, "rustc stderr blob").await?;
-    Ok(())
+    require_output_blobs(
+        state,
+        namespace,
+        &metadata.stdout,
+        &metadata.stderr,
+        "rustc",
+    )
+    .await
+}
+
+async fn require_output_blobs(
+    state: &AppState,
+    namespace: &str,
+    stdout: &Digest,
+    stderr: &Digest,
+    kind: &str,
+) -> Result<(), ApiError> {
+    require_blob(state, namespace, stdout, &format!("{kind} stdout blob")).await?;
+    require_blob(state, namespace, stderr, &format!("{kind} stderr blob")).await
 }
 
 fn validate_task_root(root: &str) -> Result<(), ApiError> {
@@ -1490,9 +1602,43 @@ mod tests {
         }))
     }
 
-    fn rustc_metadata(stdout: &Digest, stderr: &Digest, version: u8) -> Vec<u8> {
+    fn cc_action(input: &Digest, version: u8) -> Vec<u8> {
         canonical(serde_json::json!({
-            "kind":"rustc",
+            "adapter_version":1,
+            "arguments":["-c", "${workspace}/src/widget.c", "-o", "${target}/widget.o"],
+            "assembly_input_model":null,
+            "compiler":{
+                "assembler":"cc",
+                "family":"gnu",
+                "target":"x86_64-unknown-linux-gnu",
+                "version_text":"cc 15.2.0"
+            },
+            "environment":{},
+            "inputs":[
+                {"digest":input,"path":"${workspace}/src/widget.c"},
+                {"digest":input,"path":"/usr/include/stdio.h"},
+                {"digest":input,"path":"@include-manifest:${workspace}/src"}
+            ],
+            "kind":"cc",
+            "version":version
+        }))
+    }
+
+    fn build_script_action(binary_action: &Digest, version: u8) -> Vec<u8> {
+        canonical(serde_json::json!({
+            "binary_action":binary_action,
+            "cargo_environment":{"TARGET":"x86_64-unknown-linux-gnu"},
+            "environment":{},
+            "inputs":{"${workspace}/build.rs":{"kind":"missing"}},
+            "kind":"build-script",
+            "out_dir":null,
+            "version":version
+        }))
+    }
+
+    fn compiler_metadata(kind: &str, stdout: &Digest, stderr: &Digest, version: u8) -> Vec<u8> {
+        canonical(serde_json::json!({
+            "kind":kind,
             "stderr":stderr,
             "stdout":stdout,
             "version":version
@@ -2009,6 +2155,10 @@ mod tests {
                 .unwrap();
         assert_eq!(body["action_kinds"]["task"]["action_schema"], 1);
         assert_eq!(body["action_kinds"]["task"]["metadata_schema"], 1);
+        assert_eq!(body["action_kinds"]["build-script"]["action_schema"], 2);
+        assert_eq!(body["action_kinds"]["build-script"]["metadata_schema"], 1);
+        assert_eq!(body["action_kinds"]["cc"]["action_schema"], 1);
+        assert_eq!(body["action_kinds"]["cc"]["metadata_schema"], 1);
         assert_eq!(body["action_kinds"]["rustc"]["action_schema"], 1);
         assert_eq!(body["action_kinds"]["rustc"]["metadata_schema"], 1);
         assert_eq!(body["features"]["blob_packs"], true);
@@ -2048,6 +2198,56 @@ mod tests {
             StatusCode::CREATED
         );
         action
+    }
+
+    async fn publish_compiler_result(app: &Router, action: &[u8], kind: &str) -> StatusCode {
+        let action = upload_blob(app, action).await;
+        let stdout = upload_blob(app, b"").await;
+        let stderr = upload_blob(app, b"diagnostic\n").await;
+        let metadata = upload_blob(app, &compiler_metadata(kind, &stdout, &stderr, 1)).await;
+        let artifact = upload_blob(app, b"compiled artifact").await;
+        let output_root = upload_blob(app, &output_directory(&artifact)).await;
+        let result_uri = format!(
+            "/v1/action-results/{}/{}/{}",
+            action.algorithm, action.hash, action.size
+        );
+        let body = serde_json::to_vec(&ActionResult {
+            action,
+            metadata: Some(metadata),
+            output_root: Some(output_root),
+            version: 1,
+        })
+        .unwrap();
+        app.clone()
+            .oneshot(request("PUT", result_uri, Body::from(body)))
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn publishes_cc_results() {
+        let (app, _directory) = test_app().await;
+        let input = digest(b"int widget(void) { return 42; }\n");
+        assert_eq!(
+            publish_compiler_result(&app, &cc_action(&input, 1), "cc").await,
+            StatusCode::CREATED
+        );
+    }
+
+    #[tokio::test]
+    async fn publishes_build_script_results() {
+        let (app, _directory) = test_app().await;
+        let binary_action = digest(b"build script binary action");
+        assert_eq!(
+            publish_compiler_result(
+                &app,
+                &build_script_action(&binary_action, 2),
+                "build-script",
+            )
+            .await,
+            StatusCode::CREATED
+        );
     }
 
     /// A manifest is read back byte-for-byte as the canonical JSON its digest
@@ -2451,7 +2651,7 @@ mod tests {
         let action = upload_blob(&app, &rustc_action(&source, 1)).await;
         let stdout = upload_blob(&app, b"").await;
         let stderr = upload_blob(&app, b"warning: cached diagnostic\n").await;
-        let metadata = upload_blob(&app, &rustc_metadata(&stdout, &stderr, 1)).await;
+        let metadata = upload_blob(&app, &compiler_metadata("rustc", &stdout, &stderr, 1)).await;
         let artifact = upload_blob(&app, b"rlib artifact").await;
         let output_root = upload_blob(&app, &output_directory(&artifact)).await;
         let result_uri = format!(
@@ -2495,7 +2695,7 @@ mod tests {
         let action = upload_blob(&app, &canonical(action)).await;
         let stdout = upload_blob(&app, b"").await;
         let stderr = upload_blob(&app, b"linker diagnostic\n").await;
-        let metadata = upload_blob(&app, &rustc_metadata(&stdout, &stderr, 1)).await;
+        let metadata = upload_blob(&app, &compiler_metadata("rustc", &stdout, &stderr, 1)).await;
         let executable = upload_blob(&app, b"linked executable").await;
         let output_root = upload_blob(&app, &output_directory(&executable)).await;
         let result_uri = format!(
@@ -2552,7 +2752,11 @@ mod tests {
         let action = upload_blob(&app, &rustc_action(&source, 1)).await;
         let stdout = upload_blob(&app, b"").await;
         let missing_stderr = digest(b"missing diagnostic\n");
-        let metadata = upload_blob(&app, &rustc_metadata(&stdout, &missing_stderr, 1)).await;
+        let metadata = upload_blob(
+            &app,
+            &compiler_metadata("rustc", &stdout, &missing_stderr, 1),
+        )
+        .await;
         let artifact = upload_blob(&app, b"rlib artifact").await;
         let output_root = upload_blob(&app, &output_directory(&artifact)).await;
         let result_uri = format!(
@@ -2651,7 +2855,7 @@ mod tests {
         let stdout = upload_blob(&app, b"").await;
         let stderr = upload_blob(&app, b"warning\n").await;
         let mut metadata: serde_json::Value =
-            serde_json::from_slice(&rustc_metadata(&stdout, &stderr, 1)).unwrap();
+            serde_json::from_slice(&compiler_metadata("rustc", &stdout, &stderr, 1)).unwrap();
         metadata["unknown"] = true.into();
         let metadata = upload_blob(&app, &canonical(metadata)).await;
         let artifact = upload_blob(&app, b"rlib artifact").await;
