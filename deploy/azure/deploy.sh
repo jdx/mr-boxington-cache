@@ -59,6 +59,7 @@ write_actor_id=${MBX_CACHE_GITHUB_WRITE_ACTOR_ID:-216188}
 deployment_repository=${MBX_CACHE_DEPLOY_GITHUB_REPOSITORY:-jdx/mr-boxington-cache}
 deployment_owner_id=${MBX_CACHE_DEPLOY_GITHUB_OWNER_ID:-216188}
 deployment_workflow_ref=${MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF:-jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main}
+deployment_run_attempt=${MBX_CACHE_DEPLOY_GITHUB_RUN_ATTEMPT:-1}
 ssh_user=${AZURE_SSH_USER:-azureuser}
 ssh_port=${AZURE_SSH_PORT:-22}
 storage_container=${AZURE_STORAGE_CONTAINER:-cache}
@@ -94,6 +95,10 @@ if [[ ! $write_actor_id =~ ^[0-9]+$ ]]; then
 fi
 if [[ ! $deployment_owner_id =~ ^[0-9]+$ ]]; then
   echo "MBX_CACHE_DEPLOY_GITHUB_OWNER_ID must be numeric" >&2
+  exit 1
+fi
+if [[ ! $deployment_run_attempt =~ ^[1-9][0-9]*$ ]]; then
+  echo "MBX_CACHE_DEPLOY_GITHUB_RUN_ATTEMPT must be a positive integer" >&2
   exit 1
 fi
 if [[ ! $deployment_workflow_ref =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[.]github/workflows/[A-Za-z0-9_.-]+[.]ya?ml@refs/heads/[A-Za-z0-9_./-]+$ ]]; then
@@ -145,6 +150,7 @@ oidc_providers=$(jq -cn \
   --arg deployment_repository "$deployment_repository" \
   --arg deployment_owner_id "$deployment_owner_id" \
   --arg deployment_workflow_ref "$deployment_workflow_ref" \
+  --arg deployment_run_attempt "$deployment_run_attempt" \
   --argjson repositories "$trusted_repositories" \
   '[{
     issuer: "https://token.actions.githubusercontent.com",
@@ -159,7 +165,7 @@ oidc_providers=$(jq -cn \
           {claims: {repository: $entry.repository, repository_owner_id: $entry.repository_owner_id, event_name: "push"}, read: [$entry.repository], write: []}
         ]] | add
       ) + [
-        {claims: {repository: $deployment_repository, repository_owner_id: $deployment_owner_id, actor_id: $write_actor_id, run_attempt: "1", environment: "production", workflow_ref: $deployment_workflow_ref}, read: [$deployment_repository], write: [$deployment_repository]}
+        {claims: {repository: $deployment_repository, repository_owner_id: $deployment_owner_id, actor_id: $write_actor_id, run_attempt: $deployment_run_attempt, environment: "production", workflow_ref: $deployment_workflow_ref}, read: [$deployment_repository], write: [$deployment_repository]}
       ]
     )
   }]')

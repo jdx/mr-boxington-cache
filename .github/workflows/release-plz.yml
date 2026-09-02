@@ -167,6 +167,7 @@ jobs:
 
       - name: Deploy immutable image
         env:
+          MBX_CACHE_DEPLOY_GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
           MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF: jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main
           MBX_CACHE_IMAGE: ${{ format('ghcr.io/jdx/mbx-cache@{0}', needs.image.outputs.digest) }}
         run: |
