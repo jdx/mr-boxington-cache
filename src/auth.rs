@@ -118,6 +118,7 @@ pub struct Authorizer {
     grants: Vec<TokenGrant>,
     oidc: Vec<OidcProvider>,
     allow_anonymous: bool,
+    anonymous_read_namespaces: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -131,10 +132,15 @@ impl Authorizer {
         tokens_json: Option<&str>,
         oidc_providers_json: Option<&str>,
         allow_anonymous: bool,
+        anonymous_read_namespaces_json: Option<&str>,
     ) -> anyhow::Result<Self> {
         let grants: Vec<TokenGrant> = parse_json_array(tokens_json, "token grants")?;
         let configs: Vec<OidcProviderConfig> =
             parse_json_array(oidc_providers_json, "OIDC providers")?;
+        let anonymous_read_namespaces: Vec<String> = parse_json_array(
+            anonymous_read_namespaces_json,
+            "anonymous read namespace patterns",
+        )?;
         let mut issuers = std::collections::BTreeSet::new();
         let mut oidc = Vec::with_capacity(configs.len());
         for config in configs {
@@ -150,6 +156,7 @@ impl Authorizer {
             grants,
             oidc,
             allow_anonymous,
+            anonymous_read_namespaces,
         })
     }
 
@@ -170,6 +177,14 @@ impl Authorizer {
             })?;
 
         if self.allow_anonymous && self.grants.is_empty() && self.oidc.is_empty() {
+            return Ok(namespace.to_owned());
+        }
+        if matches!(access, Access::Read)
+            && self
+                .anonymous_read_namespaces
+                .iter()
+                .any(|pattern| matches_namespace(pattern, namespace))
+        {
             return Ok(namespace.to_owned());
         }
         let token = headers
@@ -600,6 +615,22 @@ mod tests {
         assert!(!valid_namespace("project name"));
     }
 
+    #[tokio::test]
+    async fn anonymous_read_patterns_never_allow_writes() {
+        let authorizer = Authorizer::new(None, None, false, Some(r#"["jdx/*"]"#))
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("mbx-cache-protocol", "1".parse().unwrap());
+        headers.insert("mbx-cache-namespace", "jdx/mise".parse().unwrap());
+
+        assert!(authorizer.authorize(&headers, Access::Read).await.is_ok());
+        assert!(authorizer.authorize(&headers, Access::Write).await.is_err());
+
+        headers.insert("mbx-cache-namespace", "private/mise".parse().unwrap());
+        assert!(authorizer.authorize(&headers, Access::Read).await.is_err());
+    }
+
     #[test]
     fn claim_requirements_match_scalars_and_arrays() {
         let claims = serde_json::json!({"repository":"jdx/mise", "groups":["dev", "release"]});
@@ -641,7 +672,7 @@ mod tests {
             "rules":[{"claims":{"repository":"jdx/mise"}, "read":["jdx/mise"]}]
         }]);
 
-        Authorizer::new(None, Some(&providers.to_string()), false)
+        Authorizer::new(None, Some(&providers.to_string()), false, None)
             .await
             .unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -683,7 +714,7 @@ mod tests {
                 "write":["jdx/mise"]
             }]
         }]);
-        let mut authorizer = Authorizer::new(None, Some(&providers.to_string()), false)
+        let mut authorizer = Authorizer::new(None, Some(&providers.to_string()), false, None)
             .await
             .unwrap();
         let now = SystemTime::now()

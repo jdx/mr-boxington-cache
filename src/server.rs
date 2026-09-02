@@ -1363,7 +1363,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let blobs = Arc::new(FilesystemStore::new(directory.path()).await.unwrap());
         let metadata = Arc::new(MemoryMetadata::default());
-        let auth = Authorizer::new(None, None, true).await.unwrap();
+        let auth = Authorizer::new(None, None, true, None).await.unwrap();
         (
             router(AppState::new(blobs, metadata, auth, 1024 * 1024)),
             directory,
@@ -1575,7 +1575,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let blobs = Arc::new(FilesystemStore::new(directory.path()).await.unwrap());
         let metadata = Arc::new(MemoryMetadata::default());
-        let auth = Authorizer::new(None, None, true).await.unwrap();
+        let auth = Authorizer::new(None, None, true, None).await.unwrap();
         (
             router(AppState::new(blobs, metadata, auth, max_blob_bytes)),
             directory,

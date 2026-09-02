@@ -169,6 +169,9 @@ oidc_providers=$(jq -cn \
       ]
     )
   }]')
+anonymous_read_namespaces=$(jq -cn \
+  --argjson repositories "$trusted_repositories" \
+  '$repositories | map(.repository)')
 
 temporary_root=${TMPDIR:-/tmp}
 temporary_root=${temporary_root%/}
@@ -226,6 +229,7 @@ write_dotenv() {
   write_dotenv MBX_CACHE_AZURE_CREDENTIAL_TYPE managed_identity
   write_dotenv MBX_CACHE_OIDC_PROVIDERS_JSON "$oidc_providers"
   write_dotenv MBX_CACHE_ALLOW_ANONYMOUS false
+  write_dotenv MBX_CACHE_ANONYMOUS_READ_NAMESPACES_JSON "$anonymous_read_namespaces"
 } >"$project_dir/runtime/cache.env"
 chmod 0600 "$project_dir/runtime/.env" "$project_dir/runtime/cache.env"
 
