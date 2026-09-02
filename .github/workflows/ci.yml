@@ -82,10 +82,6 @@ jobs:
     # Production uses PostgreSQL and Azure Blob Storage, so CI exercises both
     # real protocols rather than only their in-memory stand-ins.
     services:
-      azurite:
-        image: mcr.microsoft.com/azure-storage/azurite:3.35.0
-        ports:
-          - 10000:10000
       postgres:
         image: postgres:17-alpine
         env:
@@ -114,6 +110,10 @@ jobs:
         env:
           AZURE_STORAGE_CONNECTION_STRING: DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
         run: |
+          docker run --detach --name mbx-cache-azurite \
+            --publish 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite:3.35.0 \
+            azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
           for attempt in {1..20}; do
             if az storage container create --name cache --output none; then
               exit 0

@@ -180,7 +180,7 @@ resource "azurerm_storage_container" "cache" {
 }
 
 resource "azurerm_role_assignment" "cache_blobs" {
-  scope                            = azurerm_storage_account.cache.id
+  scope                            = azurerm_storage_container.cache.id
   role_definition_name             = "Storage Blob Data Contributor"
   principal_id                     = azurerm_linux_virtual_machine.cache.identity[0].principal_id
   principal_type                   = "ServicePrincipal"

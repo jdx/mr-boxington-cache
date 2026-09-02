@@ -262,7 +262,8 @@ Servers advertising `features.action_batch` answer `POST /v1/action-results:batc
 
 ### Bounding storage
 
-Blob storage is expired by the bucket's own lifecycle rule; `mbx-cache` removes
+Blob storage is expired by the object store's lifecycle policy (an S3 bucket
+lifecycle rule or an Azure Blob lifecycle management rule); `mbx-cache` removes
 the metadata those objects leave behind and exits without serving:
 
 ```sh
@@ -291,7 +292,11 @@ The OpenMetrics endpoint exposes the existing action and blob counters plus deta
 
 These metrics intentionally use only fixed, low-cardinality labels. Namespaces, repositories, tokens, OIDC claims, and content digests are never exposed as metric labels. Pack duration includes client backpressure through completion of the response body; time to first byte and blob-store response-header latency separate request setup from streaming time.
 
-Back up PostgreSQL and enable S3 versioning or replication as required. The service never exposes a deletion endpoint, so retention and disaster recovery remain administrative concerns.
+Back up PostgreSQL and configure the object store's recovery features as
+required: S3 versioning or replication for S3, or Blob versioning and Azure
+Storage redundancy/object replication for Azure. The service never exposes a
+deletion endpoint, so retention and disaster recovery remain administrative
+concerns.
 
 ## Development
 

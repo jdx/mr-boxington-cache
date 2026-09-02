@@ -28,7 +28,9 @@ spec:
             - {name: MBX_CACHE_AZURE_CONTAINER, value: {{ required "config.azureContainer is required for Azure storage" .Values.config.azureContainer | quote }}}
             - {name: MBX_CACHE_AZURE_PREFIX, value: {{ .Values.config.azurePrefix | quote }}}
             - {name: MBX_CACHE_AZURE_CREDENTIAL_TYPE, value: {{ .Values.config.azureCredentialType | quote }}}
-            - {name: MBX_CACHE_AZURE_ENDPOINT, value: {{ .Values.config.azureEndpoint | quote }}}
+            {{- with .Values.config.azureEndpoint }}
+            - {name: MBX_CACHE_AZURE_ENDPOINT, value: {{ . | quote }}}
+            {{- end }}
             - {name: MBX_CACHE_AZURE_ALLOW_HTTP, value: {{ .Values.config.azureAllowHttp | quote }}}
             {{- else if eq .Values.config.storage "s3" }}
             - {name: MBX_CACHE_S3_BUCKET, value: {{ required "config.s3Bucket is required" .Values.config.s3Bucket | quote }}}

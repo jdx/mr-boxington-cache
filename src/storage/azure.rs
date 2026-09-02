@@ -6,11 +6,13 @@ use object_store::{
 };
 use std::{io, path::Path, sync::Arc};
 use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use super::{Blob, BlobStore, PutOutcome};
 use crate::{config::Config, model::Digest};
 
+/// An Azure Blob Storage-backed content-addressed blob store.
 pub struct AzureStore {
     store: Arc<dyn ObjectStore>,
     prefix: String,
@@ -31,8 +33,12 @@ impl AzureStore {
             .with_container_name(container)
             .with_credential_type(&config.azure_credential_type)
             .with_allow_http(config.azure_allow_http);
-        if let Some(endpoint) = &config.azure_endpoint {
-            builder = builder.with_endpoint(endpoint.clone());
+        if let Some(endpoint) = config
+            .azure_endpoint
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            builder = builder.with_endpoint(endpoint.to_owned());
         }
         Ok(Self::from_store(
             Arc::new(builder.build()?),
@@ -53,6 +59,18 @@ impl AzureStore {
 
     fn upload_key(&self) -> ObjectPath {
         ObjectPath::from(format!("{}/uploads/{}", self.prefix, Uuid::new_v4()))
+    }
+
+    async fn wait_until_readable(&self, key: &ObjectPath) -> anyhow::Result<()> {
+        // Copy Blob may return while the destination is still an empty pending
+        // blob. Azure only exposes block-blob contents after the copy commits.
+        for _ in 0..120 {
+            if self.store.get(key).await.is_ok() {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+        anyhow::bail!("Azure blob did not become readable after copy: {key}")
     }
 }
 
@@ -82,6 +100,7 @@ impl BlobStore for AzureStore {
 
     async fn put(&self, digest: &Digest, source: &Path) -> anyhow::Result<PutOutcome> {
         let upload_key = self.upload_key();
+        let destination_key = self.key(digest);
         let file = tokio::fs::File::open(source).await?;
         let mut reader = BufReader::new(file);
         let mut writer = BufWriter::new(Arc::clone(&self.store), upload_key.clone());
@@ -99,7 +118,7 @@ impl BlobStore for AzureStore {
             .store
             .copy_opts(
                 &upload_key,
-                &self.key(digest),
+                &destination_key,
                 CopyOptions {
                     mode: CopyMode::Create,
                     ..Default::default()
@@ -107,12 +126,15 @@ impl BlobStore for AzureStore {
             )
             .await
         {
-            // Azure may finish Copy Blob asynchronously. Keep the source long
-            // enough for that operation to finish; the deployment's one-day
-            // uploads lifecycle removes it afterward.
-            Ok(_) => Ok(PutOutcome::Created),
+            // Keep the source until the uploads lifecycle removes it because
+            // Azure may still be reading it after accepting Copy Blob.
+            Ok(_) => {
+                self.wait_until_readable(&destination_key).await?;
+                Ok(PutOutcome::Created)
+            }
             Err(Error::AlreadyExists { .. } | Error::Precondition { .. }) => {
                 let _ = self.store.delete(&upload_key).await;
+                self.wait_until_readable(&destination_key).await?;
                 Ok(PutOutcome::AlreadyExists)
             }
             Err(error) => {

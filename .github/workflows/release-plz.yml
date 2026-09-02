@@ -189,7 +189,9 @@ jobs:
 
           temporary_dir=$(mktemp -d "${RUNNER_TEMP}/mbx-cache-qualification.XXXXXXXX")
           trap 'rm -rf -- "$temporary_dir"' EXIT
-          printf 'mbx-cache production qualification %s\n' "$GITHUB_SHA" >"$temporary_dir/input"
+          printf 'mbx-cache production qualification %s %s %s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            >"$temporary_dir/input"
           digest=$(sha256sum "$temporary_dir/input" | cut -d ' ' -f 1)
           size=$(wc -c <"$temporary_dir/input")
           blob_url="$CACHE_URL/v1/blobs/sha256/$digest/$size"
