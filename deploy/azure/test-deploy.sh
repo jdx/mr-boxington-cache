@@ -59,6 +59,7 @@ grep -Fq 'MBX_CACHE_AZURE_CREDENTIAL_TYPE="managed_identity"' "$project_dir/runt
 oidc_json=$(sed -n 's/^MBX_CACHE_OIDC_PROVIDERS_JSON=//p' "$project_dir/runtime/cache.env" | jq -c fromjson)
 jq -e \
   --argjson repositories "${MBX_CACHE_TEST_REPOSITORIES:?}" \
+  --arg deployment_run_attempt "${MBX_CACHE_TEST_DEPLOY_RUN_ATTEMPT:?}" \
   --arg write_actor_id "${MBX_CACHE_TEST_WRITE_ACTOR_ID:?}" '
   .[0].rules as $rules |
   # Five rules per trusted repository -- protected-main push, the exact warm
@@ -125,7 +126,7 @@ jq -e \
     .claims.repository == "jdx/mr-boxington-cache" and
     .claims.repository_owner_id == "216188" and
     .claims.actor_id == $write_actor_id and
-    .claims.run_attempt == "1" and
+    .claims.run_attempt == $deployment_run_attempt and
     .claims.environment == "production" and
     .claims.workflow_ref == "jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main" and
     .read == ["jdx/mr-boxington-cache"] and
@@ -148,8 +149,10 @@ trusted_repositories=$(jq -c 'map(.repository)' "$script_dir/trusted-repositorie
 common_env=(
   "CAPTURE_DIR=$test_root/capture"
   "MBX_CACHE_TEST_REPOSITORIES=$trusted_repositories"
+  "MBX_CACHE_TEST_DEPLOY_RUN_ATTEMPT=4"
   "MBX_CACHE_TEST_WRITE_ACTOR_ID=216188"
   "MBX_CACHE_DATABASE_PASSWORD=database_password_123456"
+  "MBX_CACHE_DEPLOY_GITHUB_RUN_ATTEMPT=4"
   "MBX_CACHE_IMAGE=ghcr.io/jdx/mbx-cache@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   "AZURE_SSH_HOST=mbx-cache-prod.tailnet.example"
   "AZURE_STORAGE_ACCOUNT=mbxcachetest"
@@ -176,6 +179,14 @@ if env "${common_env[@]}" \
   AZURE_SSH_SOURCE_CIDR=203.0.113.10/32 \
   "$script_dir/deploy.sh" --dry-run >/dev/null 2>&1; then
   echo "deploy.sh accepted a non-numeric GitHub write actor ID" >&2
+  exit 1
+fi
+
+if env "${common_env[@]}" \
+  MBX_CACHE_DEPLOY_GITHUB_RUN_ATTEMPT=zero \
+  AZURE_SSH_SOURCE_CIDR=203.0.113.10/32 \
+  "$script_dir/deploy.sh" --dry-run >/dev/null 2>&1; then
+  echo "deploy.sh accepted an invalid GitHub run attempt" >&2
   exit 1
 fi
 
