@@ -42,33 +42,6 @@ impl S3Store {
 
 #[async_trait]
 impl BlobStore for S3Store {
-    async fn size(&self, digest: &Digest) -> anyhow::Result<Option<u64>> {
-        let output = match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(self.key(digest))
-            .send()
-            .await
-        {
-            Ok(output) => output,
-            Err(error)
-                if error.as_service_error().is_some_and(|e| e.is_not_found())
-                    || error
-                        .raw_response()
-                        .is_some_and(|response| response.status().as_u16() == 404) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        output
-            .content_length()
-            .and_then(|size| u64::try_from(size).ok())
-            .map(Some)
-            .ok_or_else(|| anyhow::anyhow!("S3 object response is missing content length"))
-    }
-
     async fn get(&self, digest: &Digest) -> anyhow::Result<Option<Blob>> {
         let output = match self
             .client

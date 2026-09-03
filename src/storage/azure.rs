@@ -78,14 +78,6 @@ impl AzureStore {
 
 #[async_trait]
 impl BlobStore for AzureStore {
-    async fn size(&self, digest: &Digest) -> anyhow::Result<Option<u64>> {
-        match self.store.head(&self.key(digest)).await {
-            Ok(metadata) => Ok(Some(metadata.size)),
-            Err(Error::NotFound { .. }) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     async fn get(&self, digest: &Digest) -> anyhow::Result<Option<Blob>> {
         let result = match self.store.get(&self.key(digest)).await {
             Ok(result) => result,
@@ -211,23 +203,15 @@ mod tests {
             size: 10,
         };
 
-        assert_eq!(store.size(&digest).await.unwrap(), None);
+        assert!(store.get(&digest).await.unwrap().is_none());
         assert_eq!(
             store.put(&digest, source.path()).await.unwrap(),
             PutOutcome::Created
         );
-        assert_eq!(store.size(&digest).await.unwrap(), Some(10));
+        let blob = store.get(&digest).await.unwrap().unwrap();
+        assert_eq!(blob.size, 10);
         assert_eq!(
-            store
-                .get(&digest)
-                .await
-                .unwrap()
-                .unwrap()
-                .stream
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap()
-                .concat(),
+            blob.stream.try_collect::<Vec<_>>().await.unwrap().concat(),
             b"azure blob"[..]
         );
 
@@ -236,7 +220,7 @@ mod tests {
             store.put(&digest, source.path()).await.unwrap(),
             PutOutcome::AlreadyExists
         );
-        assert_eq!(store.size(&digest).await.unwrap(), Some(10));
+        assert_eq!(store.get(&digest).await.unwrap().unwrap().size, 10);
 
         tokio::fs::write(source.path(), b"").await.unwrap();
         let empty_digest = Digest {
@@ -248,7 +232,7 @@ mod tests {
             store.put(&empty_digest, source.path()).await.unwrap(),
             PutOutcome::Created
         );
-        assert_eq!(store.size(&empty_digest).await.unwrap(), Some(0));
+        assert_eq!(store.get(&empty_digest).await.unwrap().unwrap().size, 0);
         assert_eq!(
             store.put(&empty_digest, source.path()).await.unwrap(),
             PutOutcome::AlreadyExists

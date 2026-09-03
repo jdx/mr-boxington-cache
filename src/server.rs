@@ -546,40 +546,14 @@ async fn pack_blobs(
     let mut pack_payload_bytes = 0_u64;
     let store = state.blobs.clone();
     let metrics = state.metrics.clone();
-    let reads = stream::iter(visible.into_iter().map(|digest| {
-        let store = store.clone();
-        async move {
-            let size = match store.size(&digest).await {
-                Ok(Some(size)) => size,
-                Ok(None) => {
-                    return Err(ApiError::internal(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "visible blob is missing from storage",
-                    )));
-                }
-                Err(error) => {
-                    return Err(ApiError::internal(error));
-                }
-            };
-            if size != digest.size {
-                return Err(ApiError::internal(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "stored blob size does not match its digest",
-                )));
-            }
-            Ok::<_, ApiError>((pack_blob_header(&digest)?, digest))
-        }
-    }));
-    let mut reads = reads.buffered(MAX_PACK_STORAGE_READS);
     let mut entries = Vec::new();
-    while let Some(entry) = reads.next().await {
-        let (header, digest) = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                pack_guard.error();
-                return Err(error);
-            }
-        };
+    for digest in visible {
+        // The metadata index returned the exact requested digest, including
+        // its declared size. The streaming GET below reports and validates
+        // the stored object's real size before yielding its bytes, so a HEAD
+        // here would make every Azure blob pay for the same check twice and
+        // delay the first response byte until every HEAD completed.
+        let header = pack_blob_header(&digest)?;
         pack_payload_bytes = pack_payload_bytes
             .checked_add(digest.size)
             .ok_or_else(|| ApiError::too_large("blob pack is too large"))?;
@@ -589,7 +563,6 @@ async fn pack_blobs(
             .ok_or_else(|| ApiError::too_large("blob pack is too large"))?;
         entries.push((header, digest));
     }
-    drop(reads);
     let pack_blobs = entries.len();
     let stream_metrics = metrics.clone();
     let response_stream = async_stream::try_stream! {
@@ -1979,7 +1952,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.into_body().collect().await.is_err());
     }
 
     #[tokio::test]
@@ -1999,7 +1973,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.into_body().collect().await.is_err());
     }
 
     #[tokio::test]
