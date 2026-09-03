@@ -31,7 +31,6 @@ pub enum PutOutcome {
 
 #[async_trait]
 pub trait BlobStore: Send + Sync {
-    async fn size(&self, digest: &Digest) -> anyhow::Result<Option<u64>>;
     async fn get(&self, digest: &Digest) -> anyhow::Result<Option<Blob>>;
     async fn put(&self, digest: &Digest, source: &Path) -> anyhow::Result<PutOutcome>;
 }
