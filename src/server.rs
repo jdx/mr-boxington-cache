@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
-    body::{Body, Bytes},
-    extract::{Path, State},
+    body::{Body, Bytes, to_bytes},
+    extract::{Path, Request, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -45,6 +45,7 @@ use crate::{
 
 const BLOB_PACK_HEADER_BYTES: usize = mbx_cache_protocol::BLOB_PACK_HEADER_BYTES as usize;
 const MAX_PACK_STORAGE_READS: usize = 16;
+const MAX_ACTION_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -80,7 +81,9 @@ pub fn router(state: AppState) -> Router {
     // there is no reason to let an unauthenticated caller spend a few
     // kilobytes to fill that buffer. Axum's own 2 MB default bounds them --
     // `json_routes_keep_axums_default_body_limit` pins it -- and the largest
-    // legitimate request, MAX_BATCH_ITEMS digests, is about 1.1 MB.
+    // legitimate request, MAX_BATCH_ITEMS digests, is about 1.1 MB. Action
+    // manifests are the exception: their handler authenticates before reading
+    // a body under its own explicit bound.
     let blobs = Router::new()
         .route(
             "/v1/blobs/{algorithm}/{hash}/{size}",
@@ -808,11 +811,19 @@ async fn get_action_manifest(
 
 async fn put_action_manifest(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(parts): Path<(String, String, u64)>,
-    Json(manifest): Json<TaskActionManifest>,
+    request: Request,
 ) -> Result<Response, ApiError> {
-    let namespace = state.auth.authorize(&headers, Access::Write).await?;
+    let namespace = state
+        .auth
+        .authorize(request.headers(), Access::Write)
+        .await?;
+    let headers = request.headers().clone();
+    let body = to_bytes(request.into_body(), MAX_ACTION_MANIFEST_BYTES)
+        .await
+        .map_err(|_| ApiError::too_large("action manifest is too large"))?;
+    let manifest: TaskActionManifest = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::bad_request(format!("invalid action manifest: {error}")))?;
     let key = parse_action_digest(parts)?;
     if !manifest.validate() || manifest.selector_digest() != key {
         return Err(ApiError::bad_request(
@@ -2248,6 +2259,38 @@ mod tests {
             .await,
             StatusCode::CREATED
         );
+    }
+
+    #[tokio::test]
+    async fn accepts_action_manifests_larger_than_axums_default_limit() {
+        let (app, _directory) = test_app().await;
+        let manifest = TaskActionManifest {
+            predictions: (0..10_000)
+                .map(|index| crate::model::TaskActionPrediction {
+                    action: digest(format!("action-{index}").as_bytes()),
+                    adapter: "rustc".into(),
+                    invocation: digest(format!("invocation-{index}").as_bytes()),
+                    payload: "{}".into(),
+                })
+                .collect(),
+            task: "b".repeat(64),
+            version: 1,
+        };
+        let key = manifest.selector_digest();
+        let body = serde_json::to_vec(&manifest).unwrap();
+        assert!(body.len() > 2 * 1024 * 1024);
+        assert!(body.len() < MAX_ACTION_MANIFEST_BYTES);
+        let uri = format!(
+            "/v1/action-manifests/{}/{}/{}",
+            key.algorithm, key.hash, key.size
+        );
+
+        let response = app
+            .oneshot(request("PUT", uri, Body::from(body)))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 
     /// A manifest is read back byte-for-byte as the canonical JSON its digest
