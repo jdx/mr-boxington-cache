@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
-    body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path, State},
+    body::{Body, Bytes, to_bytes},
+    extract::{Path, Request, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -82,8 +82,8 @@ pub fn router(state: AppState) -> Router {
     // kilobytes to fill that buffer. Axum's own 2 MB default bounds them --
     // `json_routes_keep_axums_default_body_limit` pins it -- and the largest
     // legitimate request, MAX_BATCH_ITEMS digests, is about 1.1 MB. Action
-    // manifests are the exception: a large build can legitimately carry more
-    // than 2 MB of predictions, so that route has its own explicit bound.
+    // manifests are the exception: their handler authenticates before reading
+    // a body under its own explicit bound.
     let blobs = Router::new()
         .route(
             "/v1/blobs/{algorithm}/{hash}/{size}",
@@ -107,18 +107,11 @@ pub fn router(state: AppState) -> Router {
         .layer(RequestBodyLimitLayer::new(pack_limit))
         .layer(RequestDecompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(pack_limit));
-    let action_manifests = Router::new()
-        .route(
-            "/v1/action-manifests/{algorithm}/{hash}/{size}",
-            get(get_action_manifest).put(put_action_manifest),
-        )
-        .layer(DefaultBodyLimit::max(MAX_ACTION_MANIFEST_BYTES));
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/capabilities", get(capabilities))
         .merge(blobs)
         .merge(pack_uploads)
-        .merge(action_manifests)
         .route("/v1/blobs:missing", post(missing_blobs))
         .route("/v1/blobs:pack", post(pack_blobs))
         .route(
@@ -126,6 +119,10 @@ pub fn router(state: AppState) -> Router {
             get(get_action_result).put(put_action_result),
         )
         .route("/v1/action-results:batch", post(batch_action_results))
+        .route(
+            "/v1/action-manifests/{algorithm}/{hash}/{size}",
+            get(get_action_manifest).put(put_action_manifest),
+        )
         .route("/metrics", get(metrics))
         // Fastest: rustc artifacts still compress well below level 1's cost,
         // and a cache server's CPU is better spent serving than squeezing.
@@ -814,11 +811,19 @@ async fn get_action_manifest(
 
 async fn put_action_manifest(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(parts): Path<(String, String, u64)>,
-    Json(manifest): Json<TaskActionManifest>,
+    request: Request,
 ) -> Result<Response, ApiError> {
-    let namespace = state.auth.authorize(&headers, Access::Write).await?;
+    let namespace = state
+        .auth
+        .authorize(request.headers(), Access::Write)
+        .await?;
+    let headers = request.headers().clone();
+    let body = to_bytes(request.into_body(), MAX_ACTION_MANIFEST_BYTES)
+        .await
+        .map_err(|_| ApiError::too_large("action manifest is too large"))?;
+    let manifest: TaskActionManifest = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::bad_request(format!("invalid action manifest: {error}")))?;
     let key = parse_action_digest(parts)?;
     if !manifest.validate() || manifest.selector_digest() != key {
         return Err(ApiError::bad_request(
