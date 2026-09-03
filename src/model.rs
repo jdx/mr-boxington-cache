@@ -366,14 +366,10 @@ impl CcAction {
 
 impl CcCompiler {
     fn validate(&self) -> bool {
-        [
-            &self.assembler,
-            &self.family,
-            &self.target,
-            &self.version_text,
-        ]
-        .into_iter()
-        .all(|value| !value.is_empty() && valid_string(value))
+        valid_string(&self.assembler)
+            && [&self.family, &self.target, &self.version_text]
+                .into_iter()
+                .all(|value| !value.is_empty() && valid_string(value))
     }
 }
 
@@ -459,6 +455,18 @@ fn valid_normalized_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cc_compilers_allow_an_empty_assembler_identity() {
+        let compiler = CcCompiler {
+            assembler: String::new(),
+            family: "apple-clang".into(),
+            target: "arm64-apple-darwin23.6.0".into(),
+            version_text: "Apple clang version 15.0.0".into(),
+        };
+
+        assert!(compiler.validate());
+    }
 
     #[test]
     fn validates_lowercase_hex_digests() {
