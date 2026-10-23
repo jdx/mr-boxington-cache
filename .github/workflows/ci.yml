@@ -18,12 +18,12 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
         with:
-          version: 2026.10.15
+          version: 2026.10.17
           install: false
           cache: false
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
-          terraform_version: v1.16.5
+          terraform_version: v1.16.6
       - run: terraform -chdir=deploy/azure/terraform fmt -check -recursive
       - run: terraform -chdir=deploy/azure/terraform init -backend=false
       - run: terraform -chdir=deploy/azure/terraform validate
@@ -90,7 +90,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
         with:
-          version: 2026.10.15
+          version: 2026.10.17
           cache: false
       - run: mise x hk -- hk check --all
         env:
