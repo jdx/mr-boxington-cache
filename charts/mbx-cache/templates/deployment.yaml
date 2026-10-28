@@ -38,6 +38,7 @@ spec:
             - {name: MBX_CACHE_S3_REGION, value: {{ .Values.config.s3Region | quote }}}
             - {name: MBX_CACHE_S3_ENDPOINT, value: {{ .Values.config.s3Endpoint | quote }}}
             - {name: MBX_CACHE_S3_PATH_STYLE, value: {{ .Values.config.s3PathStyle | quote }}}
+            - {name: MBX_CACHE_S3_REDIRECT_DOWNLOADS, value: {{ .Values.config.s3RedirectDownloads | quote }}}
             {{- end }}
             - {name: MBX_CACHE_MAX_BLOB_BYTES, value: {{ .Values.config.maxBlobBytes | quote }}}
             - name: MBX_CACHE_TOKENS_JSON

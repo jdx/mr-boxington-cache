@@ -99,6 +99,7 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_S3_ENDPOINT` | AWS default | S3-compatible endpoint |
 | `MBX_CACHE_S3_REGION` | `us-east-1` | S3 region |
 | `MBX_CACHE_S3_PATH_STYLE` | `false` | Enable for MinIO and similar services |
+| `MBX_CACHE_S3_REDIRECT_DOWNLOADS` | `false` | Return short-lived presigned S3 URLs for full GETs instead of proxying object bodies |
 | `MBX_CACHE_TOKENS_JSON` | — | Token grants, described below |
 | `MBX_CACHE_OIDC_PROVIDERS_JSON` | — | Trusted OIDC providers and claim grants, described below |
 | `MBX_CACHE_ALLOW_ANONYMOUS` | `false` | Allow access without configured grants |
@@ -283,6 +284,47 @@ manifests untouched for that long. Keep the age longer than the storage
 lifecycle so objects go first — reversed, it removes rows for objects that still
 exist and turns cache hits into recompiles. A dangling reference is never fatal:
 a client that cannot fetch a blob treats the action as a miss.
+
+### Redirecting S3 downloads
+
+`mbx` 1.28.0 does not follow these redirects. Its individual blob fetches fail
+digest verification and become cache misses when this setting is enabled.
+Normal restores use blob packs, which remain proxied and save no egress.
+Client support and explicit redirect negotiation are needed before enabling
+this for mbx deployments.
+
+`MBX_CACHE_S3_REDIRECT_DOWNLOADS` is off by default. When enabled, an
+authorized, namespace-visible full `GET` performs an authenticated `HeadObject`
+for existence and size, then returns an empty `307 Temporary Redirect` to a
+five-minute presigned S3 URL. The cache server issues no `GetObject` and
+consumes no object body for that request. This can reduce cache-server egress;
+the S3 hoster serves the bytes.
+
+The redirect is a short-lived bearer capability. Keep it out of logs, and
+redact signed query strings and `Location` headers from ingress and S3 access
+logs. Use HTTPS outside local emulators. Namespace authorization gates issuance,
+but whoever receives the URL can reuse or share it until it expires; revoking a
+cache token does not revoke an already issued URL. Credentials may expire before
+the URL's five-minute limit.
+
+Clients must be able to reach the same S3 endpoint, host, and path style used
+for signing. The Compose endpoint `http://minio:9000` is internal to that stack,
+so redirects stay disabled there. With redirects enabled, `HEAD` is handled
+locally with `HeadObject`: it returns object metadata with no body and no
+redirect. `Range`, conditional reads, pack downloads, and internal
+descriptor/tree/metadata reads keep the existing proxy behavior. Redirects
+never carry the object's size as their own `Content-Length`, and the cache
+server does not compress the redirected body.
+
+After following `Location`, the final response is controlled by S3: its ETag
+may be a multipart/storage ETag, and a custom `Digest` response header cannot be
+added through GetObject response overrides. Clients must verify the CAS digest
+from the identity they requested, exactly as they do for pack contents.
+
+S3 permissions for this path are `s3:GetObject` (used by `GetObject` and
+`HeadObject`) and, for missing-object HEAD to return `404` instead of a
+permission error, `s3:ListBucket`. Use whatever KMS permissions the bucket's
+encryption policy requires.
 
 Run multiple stateless replicas against the same PostgreSQL database and object
 store. Readiness and liveness probes use `/v1/status`. Scrape `/metrics` with
