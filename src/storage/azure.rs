@@ -9,7 +9,10 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
-use super::{Blob, BlobStore, PutOutcome};
+use super::{
+    Blob, BlobStore, PutOutcome, UploadError, VerifiedUpload,
+    upload::{Spool, UploadSink},
+};
 use crate::{config::Config, model::Digest};
 
 /// An Azure Blob Storage-backed content-addressed blob store.
@@ -76,23 +79,8 @@ impl AzureStore {
     }
 }
 
-#[async_trait]
-impl BlobStore for AzureStore {
-    async fn get(&self, digest: &Digest) -> anyhow::Result<Option<Blob>> {
-        let result = match self.store.get(&self.key(digest)).await {
-            Ok(result) => result,
-            Err(Error::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let size = result.meta.size;
-        let stream = result
-            .into_stream()
-            .map(|result| result.map_err(io::Error::other))
-            .boxed();
-        Ok(Some(Blob { size, stream }))
-    }
-
-    async fn put(&self, digest: &Digest, source: &Path) -> anyhow::Result<PutOutcome> {
+impl AzureStore {
+    async fn put_file(&self, digest: &Digest, source: &Path) -> anyhow::Result<PutOutcome> {
         let destination_key = self.key(digest);
         if digest.size == 0 {
             let result = self
@@ -162,6 +150,66 @@ impl BlobStore for AzureStore {
     }
 }
 
+#[async_trait]
+impl BlobStore for AzureStore {
+    async fn get(&self, digest: &Digest) -> anyhow::Result<Option<Blob>> {
+        let result = match self.store.get(&self.key(digest)).await {
+            Ok(result) => result,
+            Err(Error::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let size = result.meta.size;
+        let stream = result
+            .into_stream()
+            .map(|result| result.map_err(io::Error::other))
+            .boxed();
+        Ok(Some(Blob { size, stream }))
+    }
+
+    async fn begin_upload(&self, digest: &Digest) -> anyhow::Result<VerifiedUpload> {
+        let spool = Spool::new().await?;
+        VerifiedUpload::new(
+            digest.clone(),
+            Box::new(AzureUpload {
+                store: Arc::clone(&self.store),
+                prefix: self.prefix.clone(),
+                digest: digest.clone(),
+                spool,
+            }),
+        )
+    }
+}
+
+struct AzureUpload {
+    store: Arc<dyn ObjectStore>,
+    prefix: String,
+    digest: Digest,
+    spool: Spool,
+}
+
+#[async_trait]
+impl UploadSink for AzureUpload {
+    async fn write(&mut self, chunk: &[u8]) -> Result<(), UploadError> {
+        self.spool
+            .write_all(chunk)
+            .await
+            .map_err(UploadError::Storage)
+    }
+
+    async fn commit(&mut self) -> Result<PutOutcome, UploadError> {
+        self.spool.flush().await.map_err(UploadError::Storage)?;
+        AzureStore {
+            store: Arc::clone(&self.store),
+            prefix: self.prefix.clone(),
+        }
+        .put_file(&self.digest, self.spool.path())
+        .await
+        .map_err(UploadError::Storage)
+    }
+
+    async fn abort(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,49 +240,74 @@ mod tests {
         .await;
     }
 
-    async fn exercise(store: AzureStore) {
-        let source = tempfile::NamedTempFile::new().unwrap();
-        tokio::fs::write(source.path(), b"azure blob")
-            .await
-            .unwrap();
-        let digest = Digest {
+    fn digest(bytes: &[u8]) -> Digest {
+        Digest {
             algorithm: Algorithm::Sha256.into(),
-            hash: hex::encode(Sha256::digest(b"azure blob")),
-            size: 10,
-        };
+            hash: hex::encode(Sha256::digest(bytes)),
+            size: bytes.len() as u64,
+        }
+    }
 
-        assert!(store.get(&digest).await.unwrap().is_none());
+    async fn upload(
+        store: &AzureStore,
+        digest: &Digest,
+        bytes: &[u8],
+    ) -> Result<PutOutcome, UploadError> {
+        let mut session = store.begin_upload(digest).await.unwrap();
+        session.write(bytes).await?;
+        session.finish().await
+    }
+
+    async fn exercise(store: AzureStore) {
+        let contents = b"azure blob";
+        let expected = digest(contents);
+
+        assert!(store.get(&expected).await.unwrap().is_none());
         assert_eq!(
-            store.put(&digest, source.path()).await.unwrap(),
+            upload(&store, &expected, contents).await.unwrap(),
             PutOutcome::Created
         );
-        let blob = store.get(&digest).await.unwrap().unwrap();
+        let blob = store.get(&expected).await.unwrap().unwrap();
         assert_eq!(blob.size, 10);
         assert_eq!(
             blob.stream.try_collect::<Vec<_>>().await.unwrap().concat(),
-            b"azure blob"[..]
+            contents[..]
         );
 
-        tokio::fs::write(source.path(), b"different").await.unwrap();
         assert_eq!(
-            store.put(&digest, source.path()).await.unwrap(),
+            upload(&store, &expected, contents).await.unwrap(),
             PutOutcome::AlreadyExists
         );
-        assert_eq!(store.get(&digest).await.unwrap().unwrap().size, 10);
+        assert_eq!(store.get(&expected).await.unwrap().unwrap().size, 10);
 
-        tokio::fs::write(source.path(), b"").await.unwrap();
-        let empty_digest = Digest {
-            algorithm: Algorithm::Sha256.into(),
-            hash: hex::encode(Sha256::digest(b"")),
-            size: 0,
-        };
+        // A valid-looking key with different bytes is refused before Azure is
+        // asked to publish anything, and the original object stays untouched.
+        assert!(matches!(
+            upload(&store, &expected, b"different").await,
+            Err(UploadError::Mismatch)
+        ));
         assert_eq!(
-            store.put(&empty_digest, source.path()).await.unwrap(),
+            store
+                .get(&expected)
+                .await
+                .unwrap()
+                .unwrap()
+                .stream
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .concat(),
+            contents[..]
+        );
+
+        let empty_digest = digest(b"");
+        assert_eq!(
+            upload(&store, &empty_digest, b"").await.unwrap(),
             PutOutcome::Created
         );
         assert_eq!(store.get(&empty_digest).await.unwrap().unwrap().size, 0);
         assert_eq!(
-            store.put(&empty_digest, source.path()).await.unwrap(),
+            upload(&store, &empty_digest, b"").await.unwrap(),
             PutOutcome::AlreadyExists
         );
     }

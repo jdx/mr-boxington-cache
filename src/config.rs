@@ -83,6 +83,15 @@ pub struct Config {
     #[arg(long, env = "MBX_CACHE_S3_PATH_STYLE", default_value_t = false)]
     pub s3_path_style: bool,
 
+    /// Redirect full S3 downloads to short-lived presigned object URLs.
+    ///
+    /// Off by default. When enabled, clients must be able to reach the same S3
+    /// endpoint (including its host and path style) used for signing. HEAD is
+    /// handled locally with HeadObject (metadata only, no redirect); internal
+    /// reads, ranges, and conditional requests keep proxying.
+    #[arg(long, env = "MBX_CACHE_S3_REDIRECT_DOWNLOADS", default_value_t = false)]
+    pub s3_redirect_downloads: bool,
+
     /// JSON array of token grants. See README.md for the schema.
     #[arg(long, env = "MBX_CACHE_TOKENS_JSON", hide_env_values = true)]
     pub tokens_json: Option<String>,
@@ -113,5 +122,13 @@ mod tests {
     #[test]
     fn rejects_an_empty_database_pool() {
         assert!(Config::try_parse_from(["mbx-cache", "--database-max-connections", "0"]).is_err());
+    }
+
+    #[test]
+    fn s3_redirect_downloads_default_to_off_and_can_be_enabled() {
+        let config = Config::try_parse_from(["mbx-cache"]).unwrap();
+        assert!(!config.s3_redirect_downloads);
+        let config = Config::try_parse_from(["mbx-cache", "--s3-redirect-downloads"]).unwrap();
+        assert!(config.s3_redirect_downloads);
     }
 }

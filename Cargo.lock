@@ -1855,6 +1855,7 @@ dependencies = [
  "mbx-cache-protocol",
  "object_store",
  "prometheus-client",
+ "quick-xml",
  "reqwest",
  "rsa",
  "serde",

@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
     extract::{Path, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -15,15 +15,12 @@ use mbx_cache_protocol::{
     TASK_ACTION_MANIFEST_MEDIA_TYPE, canonical_json,
 };
 use serde::{Deserialize, Serialize};
-use sha2::Digest as _;
 use std::{
     collections::{BTreeMap, HashSet},
     io,
     sync::Arc,
     time::Instant,
 };
-use tempfile::NamedTempFile;
-use tokio::io::AsyncWriteExt;
 use tower_http::{
     compression::{CompressionLayer, CompressionLevel},
     decompression::RequestDecompressionLayer,
@@ -40,7 +37,10 @@ use crate::{
         TaskActionManifest, TaskMetadata,
     },
     pack::{PackError, PackEvent, PackReader},
-    storage::{BlobStore, PutOutcome},
+    storage::{
+        BlobDownload, BlobStore, DownloadMode, MAX_UPLOAD_CHUNK_BYTES, PutOutcome, UploadError,
+        VerifiedUpload,
+    },
 };
 
 const BLOB_PACK_HEADER_BYTES: usize = mbx_cache_protocol::BLOB_PACK_HEADER_BYTES as usize;
@@ -177,6 +177,7 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn get_blob(
     State(state): State<AppState>,
+    method: Method,
     headers: HeaderMap,
     Path(parts): Path<(String, String, u64)>,
 ) -> Result<Response, ApiError> {
@@ -191,21 +192,67 @@ async fn get_blob(
         return Err(ApiError::not_found("blob not found"));
     }
     record_blob_access(&state, &namespace, std::slice::from_ref(&digest)).await;
-    let blob = state
+
+    let mode = if method == Method::HEAD {
+        DownloadMode::Head
+    } else if has_proxy_only_conditions(&headers) {
+        // The historical handler ignores these headers and serves a full 200.
+        // Handing them to S3 would accidentally opt into 206/304/412 and
+        // multipart ETag comparison, so they stay on the proxy path.
+        DownloadMode::Stream
+    } else {
+        DownloadMode::Redirect
+    };
+    let download = state
         .blobs
-        .get(&digest)
+        .download(&digest, mode)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("blob not found"))?;
     state.metrics.inc_blob_hit();
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_LENGTH, blob.size)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::ETAG, format!("\"{}\"", digest.hash))
-        .header("digest", format!("{}={}", digest.algorithm, digest.hash))
-        .body(Body::from_stream(blob.stream))
-        .map_err(ApiError::internal)
+
+    let response = match download {
+        BlobDownload::Stream(blob) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_LENGTH, blob.size)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::ETAG, format!("\"{}\"", digest.hash))
+            .header("digest", format!("{}={}", digest.algorithm, digest.hash))
+            .body(Body::from_stream(blob.stream)),
+        BlobDownload::Head { size } => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_LENGTH, size)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::ETAG, format!("\"{}\"", digest.hash))
+            .header("digest", format!("{}={}", digest.algorithm, digest.hash))
+            .body(Body::empty()),
+        BlobDownload::Redirect { location } => Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(header::LOCATION, location)
+            // The object size belongs to the eventual S3 response, not this
+            // empty redirect. Advertise only the empty redirect body.
+            .header(header::CONTENT_LENGTH, 0)
+            .header(header::CACHE_CONTROL, "private, no-store")
+            .header(header::REFERRER_POLICY, "no-referrer")
+            .header(header::ETAG, format!("\"{}\"", digest.hash))
+            .header("digest", format!("{}={}", digest.algorithm, digest.hash))
+            .body(Body::empty()),
+    }
+    .map_err(ApiError::internal)?;
+    Ok(response)
+}
+
+fn has_proxy_only_conditions(headers: &HeaderMap) -> bool {
+    [
+        header::RANGE,
+        header::IF_RANGE,
+        header::IF_MATCH,
+        header::IF_NONE_MATCH,
+        header::IF_MODIFIED_SINCE,
+        header::IF_UNMODIFIED_SINCE,
+    ]
+    .iter()
+    .any(|name| headers.contains_key(name))
 }
 
 async fn put_blob(
@@ -220,60 +267,70 @@ async fn put_blob(
     if digest.size > state.max_blob_bytes {
         return Err(ApiError::too_large("blob exceeds configured limit"));
     }
-    let temp = NamedTempFile::new().map_err(ApiError::internal)?;
-    let path = temp.path().to_owned();
-    let mut file = tokio::fs::File::create(&path)
+    let mut upload = state
+        .blobs
+        .begin_upload(&digest)
         .await
         .map_err(ApiError::internal)?;
     let mut stream = body.into_data_stream();
-    let mut size = 0_u64;
-    let mut blake3 = blake3::Hasher::new();
-    let mut sha256 = sha2::Sha256::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
-        size = size
-            .checked_add(chunk.len() as u64)
-            .ok_or_else(|| ApiError::too_large("blob is too large"))?;
-        if size > digest.size || size > state.max_blob_bytes {
-            return Err(ApiError::too_large(
-                "blob exceeds declared or configured size",
-            ));
-        }
-        match digest.algorithm_kind().map_err(ApiError::bad_request)? {
-            Algorithm::Blake3 => {
-                blake3.update(&chunk);
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                upload.abort().await;
+                return Err(ApiError::bad_request(error.to_string()));
             }
-            Algorithm::Sha256 => {
-                sha256.update(&chunk);
+        };
+        for slice in chunk.chunks(MAX_UPLOAD_CHUNK_BYTES) {
+            if let Err(error) = upload.write(slice).await {
+                return Err(upload_api_error(
+                    error,
+                    "content does not match the requested digest",
+                ));
             }
         }
-        file.write_all(&chunk).await.map_err(ApiError::internal)?;
     }
-    file.flush().await.map_err(ApiError::internal)?;
-    let actual_hash = match digest.algorithm_kind().map_err(ApiError::bad_request)? {
-        Algorithm::Blake3 => blake3.finalize().to_hex().to_string(),
-        Algorithm::Sha256 => hex::encode(sha256.finalize()),
-    };
-    if size != digest.size || actual_hash != digest.hash {
-        return Err(ApiError::bad_request(
-            "content does not match the requested digest",
-        ));
-    }
-    let outcome = state
-        .blobs
-        .put(&digest, &path)
-        .await
-        .map_err(ApiError::internal)?;
-    state
-        .metadata
-        .register_blob(&namespace, &digest, outcome)
-        .await
-        .map_err(ApiError::internal)?;
-    state.metrics.inc_blob_upload();
+    let outcome = finish_upload(
+        &state,
+        &namespace,
+        digest,
+        upload,
+        "content does not match the requested digest",
+    )
+    .await?;
     Ok(match outcome {
         PutOutcome::Created => StatusCode::CREATED,
         PutOutcome::AlreadyExists => StatusCode::NO_CONTENT,
     })
+}
+
+async fn finish_upload(
+    state: &AppState,
+    namespace: &str,
+    digest: Digest,
+    upload: VerifiedUpload,
+    mismatch: &'static str,
+) -> Result<PutOutcome, ApiError> {
+    let outcome = upload
+        .finish()
+        .await
+        .map_err(|error| upload_api_error(error, mismatch))?;
+    state
+        .metadata
+        .register_blob(namespace, &digest, outcome)
+        .await
+        .map_err(ApiError::internal)?;
+    state.metrics.inc_blob_upload();
+    Ok(outcome)
+}
+
+fn upload_api_error(error: UploadError, mismatch: &'static str) -> ApiError {
+    match error {
+        UploadError::TooLarge => ApiError::too_large("blob exceeds declared or configured size"),
+        UploadError::Mismatch => ApiError::bad_request(mismatch),
+        UploadError::Storage(error) => ApiError::internal(error),
+        UploadError::Cancelled => ApiError::internal("upload session was cancelled"),
+    }
 }
 
 #[derive(Serialize)]
@@ -311,36 +368,80 @@ async fn put_blob_pack(
     }
     let mut reader = PackReader::new(state.max_blob_bytes, declared_blobs, declared_bytes);
     let mut stream = body.into_data_stream();
-    let mut frame: Option<PackFrame> = None;
+    let mut frame: Option<(Digest, VerifiedUpload)> = None;
     let mut created = 0;
     let mut existing = 0;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
-        for event in reader.push(&chunk).map_err(pack_error)? {
-            match event {
-                PackEvent::Started(digest) => {
-                    frame = Some(PackFrame::new(digest).await?);
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                if let Some((_, upload)) = frame.take() {
+                    upload.abort().await;
                 }
-                PackEvent::Payload(payload) => {
-                    frame
-                        .as_mut()
-                        .ok_or_else(|| ApiError::internal("payload outside a blob pack frame"))?
-                        .write(&payload)
-                        .await?;
+                return Err(ApiError::bad_request(error.to_string()));
+            }
+        };
+        // The parser returns owned payload vectors. Feeding it bounded slices
+        // keeps a large transport chunk from turning into an equally large
+        // extra application-owned copy.
+        for slice in chunk.chunks(MAX_UPLOAD_CHUNK_BYTES) {
+            let events = match reader.push(slice) {
+                Ok(events) => events,
+                Err(error) => {
+                    if let Some((_, upload)) = frame.take() {
+                        upload.abort().await;
+                    }
+                    return Err(pack_error(error));
                 }
-                PackEvent::Complete => {
-                    let finished = frame.take().ok_or_else(|| {
-                        ApiError::internal("blob pack frame ended before it began")
-                    })?;
-                    match finished.store(&state, &namespace).await? {
-                        PutOutcome::Created => created += 1,
-                        PutOutcome::AlreadyExists => existing += 1,
+            };
+            for event in events {
+                match event {
+                    PackEvent::Started(digest) => {
+                        let upload = state
+                            .blobs
+                            .begin_upload(&digest)
+                            .await
+                            .map_err(ApiError::internal)?;
+                        frame = Some((digest, upload));
+                    }
+                    PackEvent::Payload(payload) => {
+                        let (_, upload) = frame.as_mut().ok_or_else(|| {
+                            ApiError::internal("payload outside a blob pack frame")
+                        })?;
+                        if let Err(error) = upload.write(&payload).await {
+                            return Err(upload_api_error(
+                                error,
+                                "packed blob does not match its declared digest",
+                            ));
+                        }
+                    }
+                    PackEvent::Complete => {
+                        let (digest, upload) = frame.take().ok_or_else(|| {
+                            ApiError::internal("blob pack frame ended before it began")
+                        })?;
+                        match finish_upload(
+                            &state,
+                            &namespace,
+                            digest,
+                            upload,
+                            "packed blob does not match its declared digest",
+                        )
+                        .await?
+                        {
+                            PutOutcome::Created => created += 1,
+                            PutOutcome::AlreadyExists => existing += 1,
+                        }
                     }
                 }
             }
         }
     }
-    reader.finish().map_err(pack_error)?;
+    if let Err(error) = reader.finish() {
+        if let Some((_, upload)) = frame.take() {
+            upload.abort().await;
+        }
+        return Err(pack_error(error));
+    }
     if reader.blobs() != declared_blobs || reader.payload_bytes() != declared_bytes {
         return Err(ApiError::bad_request(
             "blob pack does not carry what its headers declared",
@@ -352,85 +453,6 @@ async fn put_blob_pack(
         Json(BlobPackReceipt { created, existing }),
     )
         .into_response())
-}
-
-/// One frame of an uploaded pack, spooled and hashed as it arrives.
-struct PackFrame {
-    digest: Digest,
-    temp: NamedTempFile,
-    file: tokio::fs::File,
-    size: u64,
-    blake3: blake3::Hasher,
-    sha256: sha2::Sha256,
-}
-
-impl PackFrame {
-    /// Start spooling and hashing the payload declared by one frame header.
-    async fn new(digest: Digest) -> Result<Self, ApiError> {
-        let temp = NamedTempFile::new().map_err(ApiError::internal)?;
-        let file = tokio::fs::File::create(temp.path())
-            .await
-            .map_err(ApiError::internal)?;
-        Ok(Self {
-            digest,
-            temp,
-            file,
-            size: 0,
-            blake3: blake3::Hasher::new(),
-            sha256: sha2::Sha256::new(),
-        })
-    }
-
-    /// Extend the spool and the digest calculation with one payload chunk.
-    async fn write(&mut self, payload: &[u8]) -> Result<(), ApiError> {
-        self.size += payload.len() as u64;
-        match self
-            .digest
-            .algorithm_kind()
-            .map_err(ApiError::bad_request)?
-        {
-            Algorithm::Blake3 => {
-                self.blake3.update(payload);
-            }
-            Algorithm::Sha256 => {
-                self.sha256.update(payload);
-            }
-        }
-        self.file
-            .write_all(payload)
-            .await
-            .map_err(ApiError::internal)
-    }
-
-    /// Verify and publish a completed frame as an ordinary blob upload.
-    async fn store(mut self, state: &AppState, namespace: &str) -> Result<PutOutcome, ApiError> {
-        self.file.flush().await.map_err(ApiError::internal)?;
-        let actual = match self
-            .digest
-            .algorithm_kind()
-            .map_err(ApiError::bad_request)?
-        {
-            Algorithm::Blake3 => self.blake3.finalize().to_hex().to_string(),
-            Algorithm::Sha256 => hex::encode(self.sha256.finalize()),
-        };
-        if self.size != self.digest.size || actual != self.digest.hash {
-            return Err(ApiError::bad_request(
-                "packed blob does not match its declared digest",
-            ));
-        }
-        let outcome = state
-            .blobs
-            .put(&self.digest, self.temp.path())
-            .await
-            .map_err(ApiError::internal)?;
-        state
-            .metadata
-            .register_blob(namespace, &self.digest, outcome)
-            .await
-            .map_err(ApiError::internal)?;
-        state.metrics.inc_blob_upload();
-        Ok(outcome)
-    }
 }
 
 /// A malformed pack is the client's error; an oversized one says which limit.
@@ -1453,6 +1475,7 @@ mod tests {
     use super::*;
     use crate::{metadata::MemoryMetadata, storage::FilesystemStore};
     use http_body_util::BodyExt;
+    use sha2::Digest as _;
     use tower::ServiceExt;
 
     async fn test_app() -> (Router, tempfile::TempDir) {

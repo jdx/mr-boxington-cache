@@ -23,6 +23,7 @@ config:
   s3Region: us-east-1
   s3Endpoint: ""
   s3PathStyle: false
+  s3RedirectDownloads: false
   maxBlobBytes: "5368709120"
 secret:
   existingSecret: mbx-cache
