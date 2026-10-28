@@ -290,8 +290,7 @@ a client that cannot fetch a blob treats the action as a miss.
 `mbx` 1.28.0 does not follow these redirects. Its individual blob fetches fail
 digest verification and become cache misses when this setting is enabled.
 Normal restores use blob packs, which remain proxied and save no egress.
-Client support and explicit redirect negotiation are needed before enabling
-this for mbx deployments.
+Update clients to support redirects before enabling this for mbx deployments.
 
 `MBX_CACHE_S3_REDIRECT_DOWNLOADS` is off by default. When enabled, an
 authorized, namespace-visible full `GET` performs an authenticated `HeadObject`
