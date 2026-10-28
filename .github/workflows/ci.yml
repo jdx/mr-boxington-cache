@@ -74,20 +74,11 @@ jobs:
           check custom custom --set serviceAccount.name=custom
           check none existing --set serviceAccount.create=false --set serviceAccount.name=existing
           check none default --set serviceAccount.create=false
-          helm template test charts/mbx-cache "${base[@]}" \
-            | grep -F -- '- {name: MBX_CACHE_S3_REDIRECT_DOWNLOADS, value: "false"}' >/dev/null
-          helm template test charts/mbx-cache "${base[@]}" \
-            --set config.s3RedirectDownloads=true \
-            | grep -F -- '- {name: MBX_CACHE_S3_REDIRECT_DOWNLOADS, value: "true"}' >/dev/null
-          azure_render=$(helm template azure charts/mbx-cache \
+          helm template azure charts/mbx-cache \
             --set config.storage=azure \
             --set config.databaseUrl=postgres://cache/cache \
             --set config.azureAccount=mbxcache \
-            --set config.azureContainer=cache)
-          if printf '%s' "$azure_render" | grep -F MBX_CACHE_S3_REDIRECT_DOWNLOADS >/dev/null; then
-            echo "::error::Azure rendering must not contain the S3-only redirect setting"
-            exit 1
-          fi
+            --set config.azureContainer=cache >/dev/null
       - run: shellcheck deploy/azure/deploy.sh deploy/azure/test-deploy.sh
       - run: deploy/azure/test-deploy.sh
   hk:

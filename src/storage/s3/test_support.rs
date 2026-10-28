@@ -2,7 +2,7 @@
 //!
 //! This is a test-only service, not an S3 emulator. It exists so the real
 //! locked AWS SDK performs serialization, HTTP exchange, retries, response
-//! parsing, and presigning against a local endpoint without cloud credentials.
+//! parsing against a local endpoint without cloud credentials.
 //! It cannot prove every AWS or third-party S3 behavior.
 
 use std::{
@@ -42,8 +42,6 @@ pub(crate) enum Op {
     Complete,
     Abort,
     PutObject,
-    HeadObject,
-    GetObject,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,8 +60,6 @@ pub(crate) enum Operation {
         len: usize,
         if_none_match: bool,
     },
-    HeadObject,
-    GetObject,
 }
 
 #[derive(Clone, Debug)]
@@ -98,10 +94,8 @@ struct MockState {
     part_arrivals: usize,
     part_failures: HashMap<i32, (usize, u16)>,
     complete_failure: Option<CompleteFailure>,
-    head_failure: Option<u16>,
     abort_failures: VecDeque<u16>,
     missing_part_checksum: bool,
-    last_get_headers: Vec<(String, String)>,
     gate: Option<(Op, Gate)>,
 }
 
@@ -149,12 +143,12 @@ impl MockS3 {
         }
     }
 
-    pub(crate) fn store(&self, redirect: bool) -> S3Store {
-        self.store_with_budget(redirect, super::UPLOAD_BUFFER_BYTES)
+    pub(crate) fn store(&self) -> S3Store {
+        self.store_with_budget(super::UPLOAD_BUFFER_BYTES)
     }
 
-    pub(crate) fn store_with_budget(&self, redirect: bool, upload_buffer_bytes: usize) -> S3Store {
-        S3Store::from_client(self.client(), BUCKET, "v1", redirect, upload_buffer_bytes)
+    pub(crate) fn store_with_budget(&self, upload_buffer_bytes: usize) -> S3Store {
+        S3Store::from_client(self.client(), BUCKET, "v1", upload_buffer_bytes)
     }
 
     fn client(&self) -> Client {
@@ -199,14 +193,6 @@ impl MockS3 {
         self.operations().iter().filter(|op| predicate(op)).count()
     }
 
-    pub(crate) fn get_count(&self) -> usize {
-        self.operation_count(|op| matches!(op, Operation::GetObject))
-    }
-
-    pub(crate) fn head_count(&self) -> usize {
-        self.operation_count(|op| matches!(op, Operation::HeadObject))
-    }
-
     pub(crate) fn put_count(&self) -> usize {
         self.operation_count(|op| matches!(op, Operation::PutObject { .. }))
     }
@@ -228,10 +214,6 @@ impl MockS3 {
             .into_iter()
             .filter(|op| matches!(op, Operation::UploadPart { .. }))
             .collect()
-    }
-
-    pub(crate) fn last_get_headers(&self) -> Vec<(String, String)> {
-        self.state.lock().unwrap().last_get_headers.clone()
     }
 
     pub(crate) fn block_next(&self, op: Op) {
@@ -282,10 +264,6 @@ impl MockS3 {
         self.state.lock().unwrap().complete_failure = Some(CompleteFailure::Malformed);
     }
 
-    pub(crate) fn fail_head(&self, status: u16) {
-        self.state.lock().unwrap().head_failure = Some(status);
-    }
-
     pub(crate) fn fail_abort(&self, times: usize, status: u16) {
         let mut state = self.state.lock().unwrap();
         for _ in 0..times {
@@ -317,10 +295,6 @@ async fn handle(AxumState(mock): AxumState<Arc<Mutex<MockState>>>, request: Requ
         Op::Abort
     } else if method == axum::http::Method::PUT {
         Op::PutObject
-    } else if method == axum::http::Method::HEAD {
-        Op::HeadObject
-    } else if method == axum::http::Method::GET {
-        Op::GetObject
     } else {
         return error_response(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed");
     };
@@ -355,8 +329,6 @@ async fn handle(AxumState(mock): AxumState<Arc<Mutex<MockState>>>, request: Requ
             let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
             put_object(&mock, &key, &headers, &body)
         }
-        Op::HeadObject => head_object(&mock, &key),
-        Op::GetObject => get_object(&mock, &key, &headers, query),
     }
 }
 
@@ -575,62 +547,6 @@ fn put_object(
         .header(header::ETAG, "\"put-etag\"")
         .body(Body::empty())
         .unwrap()
-}
-
-fn head_object(mock: &Arc<Mutex<MockState>>, key: &str) -> Response {
-    let mut state = mock.lock().unwrap();
-    state.operations.push(Operation::HeadObject);
-    if let Some(status) = state.head_failure {
-        return Response::builder()
-            .status(StatusCode::from_u16(status).unwrap())
-            .body(Body::empty())
-            .unwrap();
-    }
-    let Some(object) = state.objects.get(key) else {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
-            .unwrap();
-    };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_LENGTH, object.len())
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn get_object(
-    mock: &Arc<Mutex<MockState>>,
-    key: &str,
-    headers: &HeaderMap,
-    query: &str,
-) -> Response {
-    let mut state = mock.lock().unwrap();
-    state.operations.push(Operation::GetObject);
-    state.last_get_headers = headers
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_owned(),
-                value.to_str().unwrap_or_default().to_owned(),
-            )
-        })
-        .collect();
-    let Some(object) = state.objects.get(key) else {
-        return error_response(StatusCode::NOT_FOUND, "NoSuchKey");
-    };
-    let content_type = query_value(query, "response-content-type")
-        .unwrap_or_else(|| "application/octet-stream".into());
-    let cache_control = query_value(query, "response-cache-control");
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_LENGTH, object.len())
-        .header(header::CONTENT_TYPE, content_type);
-    if let Some(cache_control) = cache_control {
-        builder = builder.header(header::CACHE_CONTROL, cache_control);
-    }
-    builder.body(Body::from(object.clone())).unwrap()
 }
 
 fn parse_completion(body: &[u8]) -> Result<Vec<(i32, String, Option<String>)>, ()> {

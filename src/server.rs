@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
     extract::{Path, Request, State},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -37,10 +37,7 @@ use crate::{
         TaskActionManifest, TaskMetadata,
     },
     pack::{PackError, PackEvent, PackReader},
-    storage::{
-        BlobDownload, BlobStore, DownloadMode, MAX_UPLOAD_CHUNK_BYTES, PutOutcome, UploadError,
-        VerifiedUpload,
-    },
+    storage::{BlobStore, MAX_UPLOAD_CHUNK_BYTES, PutOutcome, UploadError, VerifiedUpload},
 };
 
 const BLOB_PACK_HEADER_BYTES: usize = mbx_cache_protocol::BLOB_PACK_HEADER_BYTES as usize;
@@ -177,7 +174,6 @@ async fn capabilities(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn get_blob(
     State(state): State<AppState>,
-    method: Method,
     headers: HeaderMap,
     Path(parts): Path<(String, String, u64)>,
 ) -> Result<Response, ApiError> {
@@ -192,67 +188,21 @@ async fn get_blob(
         return Err(ApiError::not_found("blob not found"));
     }
     record_blob_access(&state, &namespace, std::slice::from_ref(&digest)).await;
-
-    let mode = if method == Method::HEAD {
-        DownloadMode::Head
-    } else if has_proxy_only_conditions(&headers) {
-        // The historical handler ignores these headers and serves a full 200.
-        // Handing them to S3 would accidentally opt into 206/304/412 and
-        // multipart ETag comparison, so they stay on the proxy path.
-        DownloadMode::Stream
-    } else {
-        DownloadMode::Redirect
-    };
-    let download = state
+    let blob = state
         .blobs
-        .download(&digest, mode)
+        .get(&digest)
         .await
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("blob not found"))?;
     state.metrics.inc_blob_hit();
-
-    let response = match download {
-        BlobDownload::Stream(blob) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_LENGTH, blob.size)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .header(header::ETAG, format!("\"{}\"", digest.hash))
-            .header("digest", format!("{}={}", digest.algorithm, digest.hash))
-            .body(Body::from_stream(blob.stream)),
-        BlobDownload::Head { size } => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_LENGTH, size)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .header(header::ETAG, format!("\"{}\"", digest.hash))
-            .header("digest", format!("{}={}", digest.algorithm, digest.hash))
-            .body(Body::empty()),
-        BlobDownload::Redirect { location } => Response::builder()
-            .status(StatusCode::TEMPORARY_REDIRECT)
-            .header(header::LOCATION, location)
-            // The object size belongs to the eventual S3 response, not this
-            // empty redirect. Advertise only the empty redirect body.
-            .header(header::CONTENT_LENGTH, 0)
-            .header(header::CACHE_CONTROL, "private, no-store")
-            .header(header::REFERRER_POLICY, "no-referrer")
-            .header(header::ETAG, format!("\"{}\"", digest.hash))
-            .header("digest", format!("{}={}", digest.algorithm, digest.hash))
-            .body(Body::empty()),
-    }
-    .map_err(ApiError::internal)?;
-    Ok(response)
-}
-
-fn has_proxy_only_conditions(headers: &HeaderMap) -> bool {
-    [
-        header::RANGE,
-        header::IF_RANGE,
-        header::IF_MATCH,
-        header::IF_NONE_MATCH,
-        header::IF_MODIFIED_SINCE,
-        header::IF_UNMODIFIED_SINCE,
-    ]
-    .iter()
-    .any(|name| headers.contains_key(name))
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_LENGTH, blob.size)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::ETAG, format!("\"{}\"", digest.hash))
+        .header("digest", format!("{}={}", digest.algorithm, digest.hash))
+        .body(Body::from_stream(blob.stream))
+        .map_err(ApiError::internal)
 }
 
 async fn put_blob(

@@ -99,7 +99,6 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_S3_ENDPOINT` | AWS default | S3-compatible endpoint |
 | `MBX_CACHE_S3_REGION` | `us-east-1` | S3 region |
 | `MBX_CACHE_S3_PATH_STYLE` | `false` | Enable for MinIO and similar services |
-| `MBX_CACHE_S3_REDIRECT_DOWNLOADS` | `false` | Return short-lived presigned S3 URLs for full GETs instead of proxying object bodies |
 | `MBX_CACHE_TOKENS_JSON` | — | Token grants, described below |
 | `MBX_CACHE_OIDC_PROVIDERS_JSON` | — | Trusted OIDC providers and claim grants, described below |
 | `MBX_CACHE_ALLOW_ANONYMOUS` | `false` | Allow access without configured grants |
@@ -129,7 +128,6 @@ export MBX_CACHE_S3_REGION=us-east-1
 # Optional for S3-compatible endpoints:
 # export MBX_CACHE_S3_ENDPOINT=https://minio.example.com
 # export MBX_CACHE_S3_PATH_STYLE=true
-# export MBX_CACHE_S3_REDIRECT_DOWNLOADS=true
 export MBX_CACHE_TOKENS_JSON='<replace-with-token-grants-json>'
 
 # Only for environments without IAM/workload roles. These are fake examples.
@@ -341,13 +339,10 @@ pack frame may already be committed, as the pack API documents.
 
 S3 credentials need these permissions, scoped to the configured blob prefix:
 
-- `s3:GetObject` for downloads and `HeadObject`
+- `s3:GetObject` for downloads
 - `s3:PutObject` for `PutObject` and the multipart upload API operations
   `CreateMultipartUpload`, `UploadPart`, and `CompleteMultipartUpload`
 - `s3:AbortMultipartUpload` for cleanup
-- `s3:ListBucket` on the bucket when missing-object `HEAD` must be
-  distinguished as `404`; without it S3 can report `403`, which is treated as a
-  backend error rather than absence
 - any KMS permissions required by the bucket's existing encryption policy
 
 Add a lifecycle rule that aborts incomplete multipart uploads under the blob
@@ -374,37 +369,6 @@ storage. A verified object completed just before metadata registration is
 retained safely and can be registered by a later reupload; the incomplete-upload
 rule does not delete completed objects. Do not expect zero orphan storage under
 every failure.
-
-### Redirecting S3 downloads
-
-`MBX_CACHE_S3_REDIRECT_DOWNLOADS` is off by default. When enabled, an
-authorized, namespace-visible full `GET` performs an authenticated `HeadObject`
-for existence and size, then returns an empty `307 Temporary Redirect` to a
-five-minute presigned S3 URL. The cache server issues no `GetObject` and
-consumes no object body for that request. This can reduce cache-server egress;
-the S3 hoster serves the bytes.
-
-The redirect is a short-lived bearer capability. Keep it out of logs, and
-redact signed query strings and `Location` headers from ingress and S3 access
-logs. Use HTTPS outside local emulators. Namespace authorization gates issuance,
-but whoever receives the URL can reuse or share it until it expires; revoking a
-cache token does not revoke an already issued URL. Credentials may expire before
-the URL's five-minute limit.
-
-Clients must be able to reach the same S3 endpoint, host, and path style used
-for signing. The Compose endpoint `http://minio:9000` is internal to that stack,
-so redirects stay disabled there. With redirects enabled, `HEAD` is handled
-locally with `HeadObject`: it returns object metadata with no body and no
-redirect. `Range`, `If-Range`, `If-Match`, `If-None-Match`, `If-Modified-Since`,
-`If-Unmodified-Since`, pack downloads, and internal descriptor/tree/metadata
-reads keep the existing proxy behavior. Redirects never carry the object's size
-as their own `Content-Length`, and the cache server does not compress the
-redirected body.
-
-After following `Location`, the final response is controlled by S3: its ETag
-may be a multipart/storage ETag, and a custom `Digest` response header cannot be
-added through GetObject response overrides. Clients must verify the CAS digest
-from the identity they requested, exactly as they do for pack contents.
 
 Run multiple stateless replicas against the same PostgreSQL database and object
 store. Every replica must use the same database/schema, S3 bucket and

@@ -12,9 +12,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use futures_util::stream;
-use http_body_util::BodyExt;
 use std::{
-    collections::BTreeMap,
     process::Command,
     sync::{
         Arc,
@@ -65,19 +63,6 @@ fn put_request(namespace: &str, digest: &Digest, body: Body) -> Request<Body> {
         .unwrap()
 }
 
-fn get_request(namespace: &str, digest: &Digest) -> Request<Body> {
-    Request::builder()
-        .method("GET")
-        .uri(format!(
-            "/v1/blobs/{}/{}/{}",
-            digest.algorithm, digest.hash, digest.size
-        ))
-        .header("mbx-cache-protocol", "1")
-        .header("mbx-cache-namespace", namespace)
-        .body(Body::empty())
-        .unwrap()
-}
-
 async fn router_upload(
     app: &axum::Router,
     namespace: &str,
@@ -120,7 +105,7 @@ async fn small_and_multipart_uploads_use_exact_parts_and_bytes() {
     // Multipart uploads must also work when a compatible provider accepts the
     // submitted checksum but does not echo it back.
     mock.omit_part_checksum();
-    let store = mock.store(false);
+    let store = mock.store();
 
     let cases: Vec<Vec<u8>> = vec![
         Vec::new(),
@@ -170,7 +155,7 @@ async fn blocked_upload_part_stops_polling_the_http_body() {
     let mock = MockS3::start().await;
     mock.block_next(Op::UploadPart);
     let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), u64::MAX).await;
+    let app = make_app(mock.store(), Arc::clone(&metadata), u64::MAX).await;
     let first = vec![b'B'; PART_SIZE];
     let tail = b"tail after the blocked part".to_vec();
     let mut contents = first.clone();
@@ -221,7 +206,7 @@ async fn blocked_upload_part_stops_polling_the_http_body() {
 async fn rejects_mismatched_short_and_oversized_bodies_without_publishing() {
     let mock = MockS3::start().await;
     let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), 1024).await;
+    let app = make_app(mock.store(), Arc::clone(&metadata), 1024).await;
 
     let claimed = digest(b"claimed contents");
     assert_eq!(
@@ -254,7 +239,7 @@ async fn rejects_mismatched_short_and_oversized_bodies_without_publishing() {
 async fn reupload_of_an_existing_key_still_verifies_every_byte() {
     let mock = MockS3::start().await;
     let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), u64::MAX).await;
+    let app = make_app(mock.store(), Arc::clone(&metadata), u64::MAX).await;
     let contents = b"immutable contents";
     let expected = digest(contents);
     assert_eq!(
@@ -282,8 +267,8 @@ async fn reupload_of_an_existing_key_still_verifies_every_byte() {
 async fn competing_stores_publish_once_and_abort_the_loser() {
     let mock = MockS3::start().await;
     mock.block_next(Op::Complete);
-    let first_store = mock.store(false);
-    let second_store = mock.store(false);
+    let first_store = mock.store();
+    let second_store = mock.store();
     let first_metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
     let second_metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
     let first = make_app(first_store, Arc::clone(&first_metadata), u64::MAX).await;
@@ -320,7 +305,7 @@ async fn retries_replay_the_same_part_including_a_short_tail() {
     let contents = vec![b'r'; PART_SIZE * 2 + 77];
     let expected = digest(&contents);
     mock.fail_part(3, 1, 500);
-    let store = mock.store(false);
+    let store = mock.store();
     assert_eq!(
         upload(&store, &expected, &contents).await.unwrap(),
         PutOutcome::Created
@@ -362,7 +347,7 @@ async fn completion_failures_never_register_or_report_success() {
     ] {
         let mock = MockS3::start().await;
         configure(&mock);
-        let store = mock.store(false);
+        let store = mock.store();
         let contents = vec![b'f'; PART_SIZE + 9];
         let expected = digest(&contents);
         let error = upload(&store, &expected, &contents).await.unwrap_err();
@@ -379,7 +364,7 @@ async fn completion_failures_never_register_or_report_success() {
 async fn abort_transient_failures_are_retried_and_the_primary_error_survives() {
     let mock = MockS3::start().await;
     mock.fail_abort(2, 503);
-    let store = mock.store(false);
+    let store = mock.store();
     let contents = vec![b'a'; PART_SIZE];
     let expected = digest(&contents);
     let mut session = store.begin_upload(&expected).await.unwrap();
@@ -395,7 +380,7 @@ async fn cancellation_cleans_up_each_in_flight_phase() {
     // remember the returned upload ID and abort it.
     let mock = MockS3::start().await;
     mock.block_next(Op::Create);
-    let store = mock.store(false);
+    let store = mock.store();
     let contents = vec![b'c'; PART_SIZE];
     let expected = digest(&contents);
     let task = tokio::spawn({
@@ -414,7 +399,7 @@ async fn cancellation_cleans_up_each_in_flight_phase() {
     // Cancelled while UploadPart is in flight.
     let mock = MockS3::start().await;
     mock.block_next(Op::UploadPart);
-    let store = mock.store(false);
+    let store = mock.store();
     let task = tokio::spawn({
         let contents = contents.clone();
         let expected = expected.clone();
@@ -432,7 +417,7 @@ async fn cancellation_cleans_up_each_in_flight_phase() {
     // already exists.
     mock.block_next(Op::UploadPart);
     let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), u64::MAX).await;
+    let app = make_app(mock.store(), Arc::clone(&metadata), u64::MAX).await;
     let (sender, receiver) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
     let body = Body::from_stream(stream::unfold(receiver, |mut receiver| async move {
         receiver.recv().await.map(|item| (item, receiver))
@@ -455,7 +440,7 @@ async fn cancellation_cleans_up_each_in_flight_phase() {
     let mock = MockS3::start().await;
     mock.block_next(Op::Complete);
     let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), u64::MAX).await;
+    let app = make_app(mock.store(), Arc::clone(&metadata), u64::MAX).await;
     let request = put_request(NAMESPACE, &expected, Body::from(contents.clone()));
     let task = tokio::spawn(async move { app.oneshot(request).await });
     mock.wait_until_blocked(Op::Complete).await;
@@ -471,7 +456,7 @@ async fn admission_is_weighted_by_reserved_bytes_and_released_after_cleanup() {
     let mock = MockS3::start().await;
     mock.block_next(Op::UploadPart);
     // One full part of budget, plus room for exactly four one-byte uploads.
-    let store = Arc::new(mock.store_with_budget(false, PART_SIZE + 4));
+    let store = Arc::new(mock.store_with_budget(PART_SIZE + 4));
     let large = vec![b'l'; PART_SIZE];
     let large_digest = digest(&large);
 
@@ -554,7 +539,7 @@ async fn admission_is_weighted_by_reserved_bytes_and_released_after_cleanup() {
 async fn pack_uploads_commit_earlier_frames_and_abort_a_later_bad_frame() {
     let mock = MockS3::start().await;
     let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), u64::MAX).await;
+    let app = make_app(mock.store(), Arc::clone(&metadata), u64::MAX).await;
     let first = b"valid packed frame";
     let first_digest = digest(first);
     let bad_digest = digest(b"claims these bytes");
@@ -628,7 +613,7 @@ async fn s3_uploads_need_no_tempdir_child() {
     }
     let mock = MockS3::start().await;
     let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), u64::MAX).await;
+    let app = make_app(mock.store(), Arc::clone(&metadata), u64::MAX).await;
     let contents = b"no temporary file";
     let expected = digest(contents);
     assert_eq!(
@@ -658,266 +643,4 @@ async fn s3_uploads_need_no_tempdir_child() {
             .await
             .unwrap()
     );
-}
-
-#[tokio::test]
-async fn redirects_are_signed_bounded_and_never_download_the_body_first() {
-    let mock = MockS3::start().await;
-    let contents = b"redirected contents";
-    let expected = digest(contents);
-    let uploader = mock.store(false);
-    upload(&uploader, &expected, contents).await.unwrap();
-    let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    metadata
-        .register_blob(NAMESPACE, &expected, PutOutcome::Created)
-        .await
-        .unwrap();
-    let redirect_store = mock.store(true);
-    let metadata_handle = Arc::clone(&metadata);
-    let app = make_app(redirect_store, metadata, u64::MAX).await;
-
-    let mut request = get_request(NAMESPACE, &expected);
-    request
-        .headers_mut()
-        .insert(header::ACCEPT_ENCODING, "zstd".parse().unwrap());
-    let response = app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    assert_eq!(mock.get_count(), 0);
-    assert_eq!(mock.head_count(), 1);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::CACHE_CONTROL)
-            .and_then(|value| value.to_str().ok()),
-        Some("private, no-store")
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get(header::REFERRER_POLICY)
-            .and_then(|value| value.to_str().ok()),
-        Some("no-referrer")
-    );
-    assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
-    assert_eq!(
-        response
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok()),
-        Some("0")
-    );
-    let location = response.headers().get(header::LOCATION).unwrap();
-    assert!(location.is_sensitive());
-    let uri = location.to_str().unwrap();
-    let url = reqwest::Url::parse(uri).unwrap();
-    let query: BTreeMap<String, String> = url
-        .query_pairs()
-        .map(|(name, value)| (name.into_owned(), value.into_owned()))
-        .collect();
-    assert!(
-        query
-            .get("X-Amz-Signature")
-            .is_some_and(|signature| !signature.is_empty())
-    );
-    assert!(
-        query
-            .get("X-Amz-Expires")
-            .and_then(|expires| expires.parse::<u64>().ok())
-            .is_some_and(|expires| expires <= 300)
-    );
-    assert_eq!(
-        query.get("response-content-type").map(String::as_str),
-        Some("application/octet-stream")
-    );
-    assert_eq!(
-        query.get("response-cache-control").map(String::as_str),
-        Some("private, no-store")
-    );
-    assert!(!query.contains_key("X-Amz-Security-Token"));
-
-    let followed = reqwest::get(uri).await.unwrap();
-    assert_eq!(followed.status(), StatusCode::OK);
-    assert_eq!(followed.bytes().await.unwrap().as_ref(), contents);
-    assert_eq!(mock.get_count(), 1);
-    assert!(
-        mock.last_get_headers()
-            .iter()
-            .all(|(name, _)| name != "authorization" && !name.starts_with("mbx-cache-"))
-    );
-    assert!(
-        metadata_handle
-            .blob_visible(NAMESPACE, &expected)
-            .await
-            .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn missing_objects_and_head_failures_preserve_visibility_gating() {
-    let mock = MockS3::start().await;
-    let missing = digest(b"stale metadata object");
-    let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    metadata
-        .register_blob(NAMESPACE, &missing, PutOutcome::Created)
-        .await
-        .unwrap();
-    let app = make_app(mock.store(true), Arc::clone(&metadata), u64::MAX).await;
-    let response = app
-        .clone()
-        .oneshot(get_request(NAMESPACE, &missing))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(mock.head_count(), 1);
-    assert_eq!(mock.get_count(), 0);
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri(format!(
-                    "/v1/blobs/{}/{}/{}",
-                    missing.algorithm, missing.hash, missing.size
-                ))
-                .header("mbx-cache-protocol", "1")
-                .header("mbx-cache-namespace", NAMESPACE)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(response.headers().get(header::LOCATION).is_none());
-    assert_eq!(mock.head_count(), 2);
-    assert_eq!(mock.get_count(), 0);
-
-    // Invisible in this namespace: no S3 operation at all.
-    let contents = b"namespace object";
-    let expected = digest(contents);
-    upload(&mock.store(false), &expected, contents)
-        .await
-        .unwrap();
-    metadata
-        .register_blob(NAMESPACE, &expected, PutOutcome::Created)
-        .await
-        .unwrap();
-    let before = mock.operations().len();
-    let response = app
-        .clone()
-        .oneshot(get_request("test/other", &expected))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert_eq!(mock.operations().len(), before);
-
-    // A HEAD permission failure is a backend error, not invented absence.
-    mock.fail_head(403);
-    let response = app
-        .oneshot(get_request(NAMESPACE, &expected))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(response.headers().get(header::LOCATION).is_none());
-}
-
-#[tokio::test]
-async fn head_ranges_and_conditional_requests_keep_the_proxy_path() {
-    let mock = MockS3::start().await;
-    let contents = b"range and condition object";
-    let expected = digest(contents);
-    let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(true), Arc::clone(&metadata), u64::MAX).await;
-    assert_eq!(
-        router_upload(&app, NAMESPACE, &expected, contents).await,
-        StatusCode::CREATED
-    );
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("HEAD")
-                .uri(format!(
-                    "/v1/blobs/{}/{}/{}",
-                    expected.algorithm, expected.hash, expected.size
-                ))
-                .header("mbx-cache-protocol", "1")
-                .header("mbx-cache-namespace", NAMESPACE)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok()),
-        Some(contents.len().to_string().as_str())
-    );
-    assert!(response.headers().get(header::LOCATION).is_none());
-    assert_eq!(mock.head_count(), 1);
-    assert_eq!(mock.get_count(), 0);
-    assert!(
-        response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .is_empty()
-    );
-
-    for conditional in [
-        (header::RANGE, "bytes=0-3"),
-        (header::IF_NONE_MATCH, "\"other\""),
-        (header::IF_MODIFIED_SINCE, "Wed, 21 Oct 2015 07:28:00 GMT"),
-    ] {
-        let mut request = get_request(NAMESPACE, &expected);
-        request
-            .headers_mut()
-            .insert(conditional.0, conditional.1.parse().unwrap());
-        let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().get(header::LOCATION).is_none());
-        assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes(),
-            contents.as_slice()
-        );
-    }
-    assert_eq!(mock.head_count(), 1);
-    assert_eq!(mock.get_count(), 3);
-    for (name, _) in mock.last_get_headers() {
-        assert!(
-            name != "range" && name != "if-none-match" && name != "if-modified-since",
-            "S3 received a condition header: {name}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn disabled_redirects_keep_the_existing_proxy_get() {
-    let mock = MockS3::start().await;
-    let contents = b"proxied by default";
-    let expected = digest(contents);
-    let metadata: Arc<dyn MetadataStore> = Arc::new(MemoryMetadata::default());
-    let app = make_app(mock.store(false), Arc::clone(&metadata), u64::MAX).await;
-    assert_eq!(
-        router_upload(&app, NAMESPACE, &expected, contents).await,
-        StatusCode::CREATED
-    );
-    let response = app
-        .oneshot(get_request(NAMESPACE, &expected))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get(header::LOCATION).is_none());
-    assert_eq!(
-        response.into_body().collect().await.unwrap().to_bytes(),
-        contents.as_slice()
-    );
-    assert_eq!(mock.head_count(), 0);
-    assert_eq!(mock.get_count(), 1);
 }

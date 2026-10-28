@@ -7,16 +7,12 @@ use aws_sdk_s3::{
 };
 use base64::Engine as _;
 use futures_util::StreamExt;
-use http::{HeaderValue, Method};
 use sha2::Digest as _;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::io::ReaderStream;
 
-use super::{
-    Blob, BlobDownload, BlobStore, DownloadMode, PutOutcome, UploadError, VerifiedUpload,
-    upload::UploadSink,
-};
+use super::{Blob, BlobStore, PutOutcome, UploadError, VerifiedUpload, upload::UploadSink};
 use crate::{config::Config, model::Digest};
 
 /// Fixed multipart geometry. The admission bound is per process, not a
@@ -30,18 +26,13 @@ const MAX_S3_OBJECT_BYTES: u64 = (PART_SIZE as u64) * (MAX_PARTS as u64);
 const UPLOAD_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 
 const COMMAND_QUEUE: usize = 2;
-const PRESIGN_EXPIRY: Duration = Duration::from_secs(300);
 const CLEANUP_BUDGET: Duration = Duration::from_secs(30);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
-
-const CACHE_CONTROL_VALUE: &str = "private, no-store";
-const CONTENT_TYPE_VALUE: &str = "application/octet-stream";
 
 pub struct S3Store {
     client: Client,
     bucket: String,
     prefix: String,
-    redirect_downloads: bool,
     upload_slots: Arc<Semaphore>,
 }
 
@@ -70,7 +61,6 @@ impl S3Store {
             Client::from_conf(s3_config),
             bucket,
             &config.s3_prefix,
-            config.s3_redirect_downloads,
             UPLOAD_BUFFER_BYTES,
         ))
     }
@@ -79,90 +69,18 @@ impl S3Store {
         client: Client,
         bucket: impl Into<String>,
         prefix: &str,
-        redirect_downloads: bool,
-        upload_limit: usize,
+        upload_buffer_bytes: usize,
     ) -> Self {
         Self {
             client,
             bucket: bucket.into(),
             prefix: prefix.trim_matches('/').to_owned(),
-            redirect_downloads,
-            upload_slots: Arc::new(Semaphore::new(upload_limit)),
+            upload_slots: Arc::new(Semaphore::new(upload_buffer_bytes)),
         }
     }
 
     fn key(&self, digest: &Digest) -> String {
         format!("{}/blobs/{}", self.prefix, digest.key())
-    }
-
-    async fn head_size(&self, digest: &Digest) -> anyhow::Result<Option<u64>> {
-        let output = match self
-            .client
-            .head_object()
-            .bucket(&self.bucket)
-            .key(self.key(digest))
-            .send()
-            .await
-        {
-            Ok(output) => output,
-            Err(error)
-                if error.as_service_error().is_some_and(|e| e.is_not_found())
-                    || error
-                        .raw_response()
-                        .is_some_and(|response| response.status().as_u16() == 404) =>
-            {
-                return Ok(None);
-            }
-            // A missing object can be reported as 403 when the signer cannot
-            // list the bucket. Never turn a permission failure into absence.
-            Err(error) => return Err(error.into()),
-        };
-        let size = output
-            .content_length()
-            .and_then(|size| u64::try_from(size).ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!("S3 object response is missing a valid content length")
-            })?;
-        if size != digest.size {
-            anyhow::bail!("S3 object size does not match the requested digest");
-        }
-        Ok(Some(size))
-    }
-
-    async fn presigned_get(&self, digest: &Digest) -> anyhow::Result<HeaderValue> {
-        // This is the secret boundary. Never let the SDK's signed request or
-        // its nested error context reach ApiError::internal logging.
-        let config = aws_sdk_s3::presigning::PresigningConfig::expires_in(PRESIGN_EXPIRY)
-            .map_err(|_| anyhow::anyhow!("S3 presigning configuration failed"))?;
-        let request = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(self.key(digest))
-            .response_content_type(CONTENT_TYPE_VALUE)
-            .response_cache_control(CACHE_CONTROL_VALUE)
-            .presigned(config)
-            .await
-            .map_err(|_| anyhow::anyhow!("S3 GET presigning failed"))?;
-
-        if request.method() != Method::GET.as_str() {
-            anyhow::bail!("S3 presigned request is not a GET");
-        }
-        // Presigning is expected to sign only the automatically supplied Host.
-        // A cache-server Authorization or namespace header here would make the
-        // redirect unusable, so fail instead of handing out a broken URL.
-        for (name, _) in request.headers() {
-            if !name.eq_ignore_ascii_case("host") {
-                anyhow::bail!("S3 presigned request requires an unexpected header");
-            }
-        }
-
-        let uri = request.uri();
-        let mut location = HeaderValue::from_str(uri).map_err(|_| {
-            anyhow::anyhow!("S3 presigned request cannot be used as a redirect location")
-        })?;
-        location.set_sensitive(true);
-        Ok(location)
     }
 }
 
@@ -225,27 +143,6 @@ impl BlobStore for S3Store {
         );
         tokio::spawn(worker.run(receiver));
         VerifiedUpload::new(digest.clone(), Box::new(S3Upload { commands }))
-    }
-
-    async fn download(
-        &self,
-        digest: &Digest,
-        mode: DownloadMode,
-    ) -> anyhow::Result<Option<BlobDownload>> {
-        if mode == DownloadMode::Stream || !self.redirect_downloads {
-            return Ok(self.get(digest).await?.map(BlobDownload::Stream));
-        }
-        let Some(size) = self.head_size(digest).await? else {
-            return Ok(None);
-        };
-        match mode {
-            DownloadMode::Head => Ok(Some(BlobDownload::Head { size })),
-            DownloadMode::Redirect => {
-                let location = self.presigned_get(digest).await?;
-                Ok(Some(BlobDownload::Redirect { location }))
-            }
-            DownloadMode::Stream => unreachable!("stream was handled above"),
-        }
     }
 }
 
