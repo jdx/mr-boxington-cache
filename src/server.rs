@@ -76,7 +76,7 @@ impl AppState {
     ) -> Self {
         let access = Arc::new(PendingAccess {
             metadata: metadata.clone(),
-            namespaces: Mutex::default(),
+            pending: Mutex::default(),
         });
         tokio::spawn(flush_access(Arc::downgrade(&access)));
         Self {
@@ -99,7 +99,14 @@ impl AppState {
 /// one background task writes them, one statement per namespace.
 struct PendingAccess {
     metadata: Arc<dyn MetadataStore>,
-    namespaces: Mutex<HashMap<String, HashSet<Digest>>>,
+    pending: Mutex<Pending>,
+}
+
+#[derive(Default)]
+struct Pending {
+    namespaces: HashMap<String, HashSet<Digest>>,
+    /// Digests across all namespaces, so a read need not count them.
+    len: usize,
 }
 
 impl PendingAccess {
@@ -108,35 +115,44 @@ impl PendingAccess {
     /// Losing an access record only makes eviction slightly less well
     /// informed, so this never fails a served blob, nor makes it wait.
     fn record(&self, namespace: &str, digests: &[Digest]) {
-        let mut namespaces = self.namespaces.lock().expect("access lock poisoned");
-        let held: usize = namespaces.values().map(HashSet::len).sum();
-        let mut room = MAX_PENDING_ACCESSES.saturating_sub(held);
+        let mut pending = self.pending.lock().expect("access lock poisoned");
+        let Pending { namespaces, len } = &mut *pending;
+        // An entry is only made for a digest that fits, so the limit also
+        // bounds how many namespaces are held.
+        if digests.is_empty() || *len >= MAX_PENDING_ACCESSES {
+            return;
+        }
         if !namespaces.contains_key(namespace) {
             namespaces.insert(namespace.to_owned(), HashSet::new());
         }
-        let pending = namespaces.get_mut(namespace).expect("inserted above");
+        let held = namespaces.get_mut(namespace).expect("inserted above");
         // Most reads are of blobs already pending, so test before cloning.
         for digest in digests {
-            if room == 0 {
+            if *len >= MAX_PENDING_ACCESSES {
                 break;
             }
-            if !pending.contains(digest) {
-                pending.insert(digest.clone());
-                room -= 1;
+            if !held.contains(digest) {
+                held.insert(digest.clone());
+                *len += 1;
             }
         }
     }
 
     async fn flush(&self) {
-        let namespaces =
-            std::mem::take(&mut *self.namespaces.lock().expect("access lock poisoned"));
-        for (namespace, digests) in namespaces {
+        let pending = std::mem::take(&mut *self.pending.lock().expect("access lock poisoned"));
+        let mut failed = 0_usize;
+        let mut last_error = None;
+        for (namespace, digests) in pending.namespaces {
             let digests = digests.into_iter().collect::<Vec<_>>();
             for chunk in digests.chunks(MAX_BATCH_ITEMS) {
                 if let Err(error) = self.metadata.touch_blobs(&namespace, chunk).await {
-                    tracing::warn!(%error, %namespace, "could not record blob access");
+                    failed += 1;
+                    last_error = Some((namespace.clone(), error));
                 }
             }
+        }
+        if let Some((namespace, error)) = last_error {
+            tracing::warn!(%error, %namespace, failed, "could not record blob access");
         }
     }
 }
@@ -3535,7 +3551,7 @@ mod tests {
     fn drops_accesses_past_the_pending_limit() {
         let access = PendingAccess {
             metadata: Arc::new(MemoryMetadata::default()),
-            namespaces: Mutex::default(),
+            pending: Mutex::default(),
         };
         let digests = (0..=MAX_PENDING_ACCESSES)
             .map(|index| digest(index.to_string().as_bytes()))
@@ -3544,9 +3560,12 @@ mod tests {
         access.record("one", &digests);
         access.record("two", &digests[..1]);
 
-        let namespaces = access.namespaces.lock().unwrap();
-        assert_eq!(namespaces["one"].len(), MAX_PENDING_ACCESSES);
-        assert!(namespaces["two"].is_empty());
+        access.record("three", &[]);
+
+        let pending = access.pending.lock().unwrap();
+        assert_eq!(pending.len, MAX_PENDING_ACCESSES);
+        assert_eq!(pending.namespaces["one"].len(), MAX_PENDING_ACCESSES);
+        assert_eq!(pending.namespaces.len(), 1);
     }
 
     #[tokio::test]
@@ -3554,7 +3573,7 @@ mod tests {
         let metadata = Arc::new(TouchProbe::default());
         let access = PendingAccess {
             metadata: metadata.clone(),
-            namespaces: Mutex::default(),
+            pending: Mutex::default(),
         };
         let mut both = vec![digest(b"first"), digest(b"second")];
         both.sort_by(|left, right| left.hash.cmp(&right.hash));
