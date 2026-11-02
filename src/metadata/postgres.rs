@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
-use super::{CommitOutcome, ManifestCommitOutcome, ManifestRecord, MetadataStore, SweepOutcome};
+use super::{
+    CommitOutcome, ManifestCommitOutcome, ManifestRecord, MetadataStore, PoolStats, SweepOutcome,
+};
 use crate::model::{ActionResult, Digest, TaskActionManifest};
 use crate::storage::PutOutcome;
 
@@ -136,6 +138,14 @@ impl MetadataStore for PostgresMetadata {
             blobs,
             action_results,
             manifests,
+        })
+    }
+
+    fn pool_stats(&self) -> Option<PoolStats> {
+        Some(PoolStats {
+            max: self.pool.options().get_max_connections(),
+            open: self.pool.size(),
+            idle: self.pool.num_idle(),
         })
     }
 
@@ -386,6 +396,20 @@ mod tests {
             error.to_string(),
             "database max connections must be at least 1"
         );
+    }
+
+    #[tokio::test]
+    async fn reports_connections_in_use() {
+        let Some(store) = store().await else {
+            return;
+        };
+        let _held = store.pool.acquire().await.unwrap();
+
+        let stats = store.pool_stats().unwrap();
+
+        assert_eq!(stats.max, 4);
+        assert!(stats.open >= 1);
+        assert!((stats.idle as u32) < stats.open);
     }
 
     /// A namespace no other test shares, so one database serves them all.

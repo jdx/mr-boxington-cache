@@ -5,6 +5,8 @@ use prometheus_client::{
 };
 use std::{sync::Arc, time::Duration, time::Instant};
 
+use crate::metadata::PoolStats;
+
 type HistogramFamily = Family<OutcomeLabels, Histogram, fn() -> Histogram>;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -16,6 +18,11 @@ struct BuildLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct KindLabels {
     kind: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct StateLabels {
+    state: &'static str,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -41,6 +48,8 @@ pub struct Metrics {
     pack_metadata_query_duration: HistogramFamily,
     pack_storage_gets: Family<OutcomeLabels, Counter>,
     pack_storage_get_duration: HistogramFamily,
+    database_pool_connections: Family<StateLabels, Gauge>,
+    database_pool_max_connections: Gauge,
 }
 
 impl Metrics {
@@ -152,6 +161,18 @@ impl Metrics {
             "Time to receive blob-store GET response headers for blob packs",
             pack_storage_get_duration.clone(),
         );
+        let database_pool_connections = Family::default();
+        registry.register(
+            "database_pool_connections",
+            "Open metadata database connections, idle or in use by a request",
+            database_pool_connections.clone(),
+        );
+        let database_pool_max_connections = Gauge::default();
+        registry.register(
+            "database_pool_max_connections",
+            "Metadata database connections the pool may open; requests wait once all are in use",
+            database_pool_max_connections.clone(),
+        );
 
         Self {
             registry,
@@ -171,6 +192,8 @@ impl Metrics {
             pack_metadata_query_duration,
             pack_storage_gets,
             pack_storage_get_duration,
+            database_pool_connections,
+            database_pool_max_connections,
         }
     }
 
@@ -178,6 +201,19 @@ impl Metrics {
         let mut buffer = String::new();
         encode(&mut buffer, &self.registry)?;
         Ok(buffer)
+    }
+
+    pub fn set_database_pool(&self, stats: PoolStats) {
+        let idle = i64::try_from(stats.idle).unwrap_or(i64::MAX);
+        self.database_pool_connections
+            .get_or_create(&StateLabels { state: "idle" })
+            .set(idle);
+        self.database_pool_connections
+            .get_or_create(&StateLabels { state: "in_use" })
+            // The two counts are read apart, so a connection closing between
+            // them could otherwise go negative.
+            .set(i64::from(stats.open).saturating_sub(idle).max(0));
+        self.database_pool_max_connections.set(i64::from(stats.max));
     }
 
     pub fn inc_blob_hit(&self) {
@@ -330,4 +366,25 @@ fn duration_histogram() -> Histogram {
 
 fn histogram_family() -> HistogramFamily {
     Family::new_with_constructor(duration_histogram as fn() -> Histogram)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exposes_database_pool_connections() {
+        let metrics = Metrics::new();
+        metrics.set_database_pool(PoolStats {
+            max: 32,
+            open: 10,
+            idle: 3,
+        });
+
+        let body = metrics.encode().unwrap();
+
+        assert!(body.contains("mbx_cache_database_pool_connections{state=\"idle\"} 3"));
+        assert!(body.contains("mbx_cache_database_pool_connections{state=\"in_use\"} 7"));
+        assert!(body.contains("mbx_cache_database_pool_max_connections 32"));
+    }
 }
