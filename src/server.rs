@@ -1484,7 +1484,24 @@ impl ApiError {
             advertise_protocol: true,
         }
     }
-    pub fn internal(error: impl std::fmt::Display) -> Self {
+    pub fn internal(error: impl std::fmt::Display + 'static) -> Self {
+        // Every metadata failure arrives here, so this is the one place that
+        // can tell a full connection pool, which clears on its own, from a
+        // fault. Callers pass whatever error they hold, hence the downcast.
+        let any = &error as &dyn std::any::Any;
+        let pool_timed_out = matches!(
+            any.downcast_ref::<anyhow::Error>()
+                .and_then(|error| error.downcast_ref::<sqlx::Error>())
+                .or_else(|| any.downcast_ref::<sqlx::Error>()),
+            Some(sqlx::Error::PoolTimedOut)
+        );
+        if pool_timed_out {
+            tracing::warn!(%error, "request failed: database pool exhausted");
+            return Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "database busy, retry later",
+            );
+        }
         tracing::error!(%error, "request failed");
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
     }
@@ -1498,6 +1515,11 @@ impl IntoResponse for ApiError {
             response
                 .headers_mut()
                 .insert("mbx-cache-protocol", header::HeaderValue::from_static("1"));
+        }
+        if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
         }
         response
     }
@@ -3254,5 +3276,21 @@ mod tests {
                 .status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn answers_an_exhausted_database_pool_as_unavailable() {
+        for error in [
+            ApiError::internal(anyhow::Error::from(sqlx::Error::PoolTimedOut)),
+            ApiError::internal(sqlx::Error::PoolTimedOut),
+        ] {
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        }
+        let response =
+            ApiError::internal(anyhow::Error::from(sqlx::Error::RowNotFound)).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(header::RETRY_AFTER));
     }
 }
