@@ -959,8 +959,22 @@ async fn validate_tree(state: &AppState, namespace: &str, root: &Digest) -> Resu
             ));
         }
         validate_directory_entries(&directory)?;
+        let mut files = HashSet::new();
         for file in directory.files {
-            require_blob(state, namespace, &file.digest, "file blob").await?;
+            validate_digest(&file.digest)?;
+            files.insert(file.digest);
+        }
+        // One query per directory: a directory can list tens of thousands of files.
+        let files: Vec<Digest> = files.into_iter().collect();
+        if state
+            .metadata
+            .visible_blobs(namespace, &files)
+            .await
+            .map_err(ApiError::internal)?
+            .len()
+            != files.len()
+        {
+            return Err(ApiError::unprocessable("file blob is missing"));
         }
         pending.push(Visit::Exit(digest));
         pending.extend(
@@ -2200,6 +2214,54 @@ mod tests {
         assert_eq!(body["version"], 1);
         assert!(body.get("result").is_none());
         assert!(body.get("signatures").is_none());
+    }
+
+    #[tokio::test]
+    async fn checks_every_file_of_an_output_tree() {
+        let (app, _directory) = test_app().await;
+        let action = upload_blob(&app, &task_action(1)).await;
+        let metadata = upload_blob(&app, &task_metadata("task", 1)).await;
+        let artifact = upload_blob(&app, b"artifact").await;
+        let absent = digest(b"never uploaded");
+        let file = |name: &str, digest: &Digest| serde_json::json!({"digest":digest,"executable":false,"mode":420,"name":name});
+        let result_uri = format!(
+            "/v1/action-results/{}/{}/{}",
+            action.algorithm, action.hash, action.size
+        );
+        let mut statuses = Vec::new();
+        for files in [
+            vec![file("a", &artifact), file("b", &absent)],
+            vec![file("a", &artifact), file("b", &artifact)],
+        ] {
+            let root = upload_blob(
+                &app,
+                &canonical(serde_json::json!({
+                    "directories":[],
+                    "files":files,
+                    "symlinks":[],
+                    "version":1
+                })),
+            )
+            .await;
+            let result = ActionResult {
+                action: action.clone(),
+                metadata: Some(metadata.clone()),
+                output_root: Some(root),
+                version: 1,
+            };
+            let body = serde_json::to_vec(&result).unwrap();
+            statuses.push(
+                app.clone()
+                    .oneshot(request("PUT", result_uri.clone(), Body::from(body)))
+                    .await
+                    .unwrap()
+                    .status(),
+            );
+        }
+        assert_eq!(
+            statuses,
+            [StatusCode::UNPROCESSABLE_ENTITY, StatusCode::CREATED]
+        );
     }
 
     #[tokio::test]
