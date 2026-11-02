@@ -17,9 +17,9 @@ use mbx_cache_protocol::{
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io,
-    sync::Arc,
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
@@ -48,6 +48,12 @@ const BLOB_PACK_HEADER_BYTES: usize = mbx_cache_protocol::BLOB_PACK_HEADER_BYTES
 const MAX_PACK_STORAGE_READS: usize = 16;
 const MAX_ACTION_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a served blob waits before its access is written. The database
+/// refreshes an access at most once an hour, so this delay is invisible to it.
+const ACCESS_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
+/// Accesses held between flushes. Past this, new ones are dropped: each costs
+/// a little memory, and losing one only makes eviction less well informed.
+const MAX_PENDING_ACCESSES: usize = 100_000;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -57,6 +63,7 @@ pub struct AppState {
     pub max_blob_bytes: u64,
     pub pack_store_concurrency: usize,
     metrics: Arc<Metrics>,
+    access: Arc<PendingAccess>,
 }
 
 impl AppState {
@@ -67,6 +74,11 @@ impl AppState {
         max_blob_bytes: u64,
         pack_store_concurrency: usize,
     ) -> Self {
+        let access = Arc::new(PendingAccess {
+            metadata: metadata.clone(),
+            namespaces: Mutex::default(),
+        });
+        tokio::spawn(flush_access(Arc::downgrade(&access)));
         Self {
             blobs,
             metadata,
@@ -74,7 +86,71 @@ impl AppState {
             max_blob_bytes,
             pack_store_concurrency,
             metrics: Arc::new(Metrics::new()),
+            access,
         }
+    }
+}
+
+/// Blob accesses served but not yet written, by namespace.
+///
+/// A read that wrote its own access held a database connection for it, and
+/// under a burst of builds those writes took the connections the reads
+/// themselves were waiting for. Reads now only note their digests here, and
+/// one background task writes them, one statement per namespace.
+struct PendingAccess {
+    metadata: Arc<dyn MetadataStore>,
+    namespaces: Mutex<HashMap<String, HashSet<Digest>>>,
+}
+
+impl PendingAccess {
+    /// Note a read so a future garbage collector can evict by real use.
+    ///
+    /// Losing an access record only makes eviction slightly less well
+    /// informed, so this never fails a served blob, nor makes it wait.
+    fn record(&self, namespace: &str, digests: &[Digest]) {
+        let mut namespaces = self.namespaces.lock().expect("access lock poisoned");
+        let held: usize = namespaces.values().map(HashSet::len).sum();
+        let mut room = MAX_PENDING_ACCESSES.saturating_sub(held);
+        if !namespaces.contains_key(namespace) {
+            namespaces.insert(namespace.to_owned(), HashSet::new());
+        }
+        let pending = namespaces.get_mut(namespace).expect("inserted above");
+        // Most reads are of blobs already pending, so test before cloning.
+        for digest in digests {
+            if room == 0 {
+                break;
+            }
+            if !pending.contains(digest) {
+                pending.insert(digest.clone());
+                room -= 1;
+            }
+        }
+    }
+
+    async fn flush(&self) {
+        let namespaces =
+            std::mem::take(&mut *self.namespaces.lock().expect("access lock poisoned"));
+        for (namespace, digests) in namespaces {
+            let digests = digests.into_iter().collect::<Vec<_>>();
+            for chunk in digests.chunks(MAX_BATCH_ITEMS) {
+                if let Err(error) = self.metadata.touch_blobs(&namespace, chunk).await {
+                    tracing::warn!(%error, %namespace, "could not record blob access");
+                }
+            }
+        }
+    }
+}
+
+/// Write pending accesses until the state that owns them is dropped.
+async fn flush_access(access: Weak<PendingAccess>) {
+    let mut interval = tokio::time::interval(ACCESS_FLUSH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let Some(access) = access.upgrade() else {
+            return;
+        };
+        access.flush().await;
     }
 }
 
@@ -139,16 +215,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Note a read so a future garbage collector can evict by real use.
-///
-/// Losing an access record only makes eviction slightly less well informed, so
-/// this never turns a served blob into a failed request.
-async fn record_blob_access(state: &AppState, namespace: &str, digests: &[Digest]) {
-    if let Err(error) = state.metadata.touch_blobs(namespace, digests).await {
-        tracing::debug!(%error, "could not record blob access");
-    }
-}
-
 async fn status() -> impl IntoResponse {
     Json(serde_json::json!({"status":"ok","protocol":PROTOCOL_VERSION}))
 }
@@ -201,7 +267,9 @@ async fn get_blob(
     {
         return Err(ApiError::not_found("blob not found"));
     }
-    record_blob_access(&state, &namespace, std::slice::from_ref(&digest)).await;
+    state
+        .access
+        .record(&namespace, std::slice::from_ref(&digest));
     let blob = state
         .blobs
         .get(&digest)
@@ -589,7 +657,7 @@ async fn pack_blobs(
             return Err(ApiError::internal(error));
         }
     };
-    record_blob_access(&state, &namespace, &visible).await;
+    state.access.record(&namespace, &visible);
     let missing_blobs = requested.len().saturating_sub(visible.len()) as u64;
     let mut pack_guard = state.metrics.start_pack(
         request_started,
@@ -3359,5 +3427,152 @@ mod tests {
             ApiError::internal(anyhow::Error::from(sqlx::Error::RowNotFound)).into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!response.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    /// Metadata whose access writes are recorded, or never complete.
+    #[derive(Default)]
+    struct TouchProbe {
+        inner: MemoryMetadata,
+        stall: bool,
+        touches: Mutex<Vec<(String, Vec<Digest>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataStore for TouchProbe {
+        async fn visible_blobs(
+            &self,
+            namespace: &str,
+            digests: &[Digest],
+        ) -> anyhow::Result<Vec<Digest>> {
+            self.inner.visible_blobs(namespace, digests).await
+        }
+        async fn register_blob(
+            &self,
+            namespace: &str,
+            digest: &Digest,
+            stored: PutOutcome,
+        ) -> anyhow::Result<()> {
+            self.inner.register_blob(namespace, digest, stored).await
+        }
+        async fn touch_blobs(&self, namespace: &str, digests: &[Digest]) -> anyhow::Result<()> {
+            if self.stall {
+                std::future::pending::<()>().await;
+            }
+            let mut digests = digests.to_vec();
+            digests.sort_by(|left, right| left.hash.cmp(&right.hash));
+            self.touches
+                .lock()
+                .unwrap()
+                .push((namespace.to_owned(), digests));
+            Ok(())
+        }
+        async fn get(
+            &self,
+            namespace: &str,
+            action: &Digest,
+        ) -> anyhow::Result<Option<ActionResult>> {
+            self.inner.get(namespace, action).await
+        }
+        async fn commit(
+            &self,
+            namespace: &str,
+            action: &Digest,
+            result: &ActionResult,
+        ) -> anyhow::Result<CommitOutcome> {
+            self.inner.commit(namespace, action, result).await
+        }
+        async fn get_manifest(
+            &self,
+            namespace: &str,
+            key: &Digest,
+        ) -> anyhow::Result<Option<crate::metadata::ManifestRecord>> {
+            self.inner.get_manifest(namespace, key).await
+        }
+        async fn commit_manifest(
+            &self,
+            namespace: &str,
+            key: &Digest,
+            expected_etag: Option<&str>,
+            etag: &str,
+            manifest: &TaskActionManifest,
+        ) -> anyhow::Result<ManifestCommitOutcome> {
+            self.inner
+                .commit_manifest(namespace, key, expected_etag, etag, manifest)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn serves_blobs_while_access_writes_are_stalled() {
+        let directory = tempfile::tempdir().unwrap();
+        let blobs = Arc::new(FilesystemStore::new(directory.path()).await.unwrap());
+        let metadata = Arc::new(TouchProbe {
+            stall: true,
+            ..Default::default()
+        });
+        let auth = Authorizer::new(None, None, true, None).await.unwrap();
+        let app = router(AppState::new(blobs, metadata, auth, 1024 * 1024, 8));
+        let digest = upload_blob(&app, b"hot blob").await;
+        let uri = format!(
+            "/v1/blobs/{}/{}/{}",
+            digest.algorithm, digest.hash, digest.size
+        );
+
+        for _ in 0..3 {
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                app.clone()
+                    .oneshot(request("GET", uri.clone(), Body::empty())),
+            )
+            .await
+            .expect("a blob read waited on its access write")
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    #[test]
+    fn drops_accesses_past_the_pending_limit() {
+        let access = PendingAccess {
+            metadata: Arc::new(MemoryMetadata::default()),
+            namespaces: Mutex::default(),
+        };
+        let digests = (0..=MAX_PENDING_ACCESSES)
+            .map(|index| digest(index.to_string().as_bytes()))
+            .collect::<Vec<_>>();
+
+        access.record("one", &digests);
+        access.record("two", &digests[..1]);
+
+        let namespaces = access.namespaces.lock().unwrap();
+        assert_eq!(namespaces["one"].len(), MAX_PENDING_ACCESSES);
+        assert!(namespaces["two"].is_empty());
+    }
+
+    #[tokio::test]
+    async fn writes_each_pending_access_once_per_namespace() {
+        let metadata = Arc::new(TouchProbe::default());
+        let access = PendingAccess {
+            metadata: metadata.clone(),
+            namespaces: Mutex::default(),
+        };
+        let mut both = vec![digest(b"first"), digest(b"second")];
+        both.sort_by(|left, right| left.hash.cmp(&right.hash));
+
+        access.record("one", &both[..1]);
+        access.record("one", &both);
+        access.record("two", &both[1..]);
+        access.flush().await;
+        access.flush().await;
+
+        let mut touches = metadata.touches.lock().unwrap().clone();
+        touches.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            touches,
+            vec![
+                ("one".to_owned(), both.clone()),
+                ("two".to_owned(), both[1..].to_vec())
+            ]
+        );
     }
 }
