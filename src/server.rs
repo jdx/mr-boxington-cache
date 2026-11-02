@@ -20,7 +20,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     io,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
 use tokio::io::AsyncWriteExt;
@@ -28,6 +28,7 @@ use tower_http::{
     compression::{CompressionLayer, CompressionLevel},
     decompression::RequestDecompressionLayer,
     limit::RequestBodyLimitLayer,
+    timeout::RequestBodyTimeoutLayer,
     trace::TraceLayer,
 };
 
@@ -46,6 +47,7 @@ use crate::{
 const BLOB_PACK_HEADER_BYTES: usize = mbx_cache_protocol::BLOB_PACK_HEADER_BYTES as usize;
 const MAX_PACK_STORAGE_READS: usize = 16;
 const MAX_ACTION_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+const REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -130,6 +132,9 @@ pub fn router(state: AppState) -> Router {
         // Fastest: rustc artifacts still compress well below level 1's cost,
         // and a cache server's CPU is better spent serving than squeezing.
         .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
+        // An idle bound, not a total one: a multi-gigabyte upload may take
+        // minutes, but a client that stops sending must not hold its spool file.
+        .layer(RequestBodyTimeoutLayer::new(REQUEST_BODY_IDLE_TIMEOUT))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
