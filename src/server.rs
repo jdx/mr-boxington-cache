@@ -3450,6 +3450,7 @@ mod tests {
     struct TouchProbe {
         inner: MemoryMetadata,
         stall: bool,
+        entered: tokio::sync::Notify,
         touches: Mutex<Vec<(String, Vec<Digest>)>>,
     }
 
@@ -3471,6 +3472,7 @@ mod tests {
             self.inner.register_blob(namespace, digest, stored).await
         }
         async fn touch_blobs(&self, namespace: &str, digests: &[Digest]) -> anyhow::Result<()> {
+            self.entered.notify_one();
             if self.stall {
                 std::future::pending::<()>().await;
             }
@@ -3527,14 +3529,14 @@ mod tests {
             ..Default::default()
         });
         let auth = Authorizer::new(None, None, true, None).await.unwrap();
-        let app = router(AppState::new(blobs, metadata, auth, 1024 * 1024, 8));
+        let state = AppState::new(blobs, metadata.clone(), auth, 1024 * 1024, 8);
+        let app = router(state.clone());
         let digest = upload_blob(&app, b"hot blob").await;
         let uri = format!(
             "/v1/blobs/{}/{}/{}",
             digest.algorithm, digest.hash, digest.size
         );
-
-        for _ in 0..3 {
+        let read = || async {
             let response = tokio::time::timeout(
                 Duration::from_secs(5),
                 app.clone()
@@ -3544,7 +3546,18 @@ mod tests {
             .expect("a blob read waited on its access write")
             .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
+        };
+        read().await;
+        let access = state.access.clone();
+        let flushing = tokio::spawn(async move { access.flush().await });
+        tokio::time::timeout(Duration::from_secs(5), metadata.entered.notified())
+            .await
+            .expect("a flush should start writing the access");
+
+        for _ in 0..3 {
+            read().await;
         }
+        flushing.abort();
     }
 
     #[test]
@@ -3557,10 +3570,9 @@ mod tests {
             .map(|index| digest(index.to_string().as_bytes()))
             .collect::<Vec<_>>();
 
+        access.record("three", &[]);
         access.record("one", &digests);
         access.record("two", &digests[..1]);
-
-        access.record("three", &[]);
 
         let pending = access.pending.lock().unwrap();
         assert_eq!(pending.len, MAX_PENDING_ACCESSES);
