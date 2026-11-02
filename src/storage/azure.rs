@@ -1,8 +1,11 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use object_store::{
-    CopyMode, CopyOptions, Error, ObjectStore, ObjectStoreExt, PutMode, PutOptions,
-    azure::MicrosoftAzureBuilder, buffered::BufWriter, path::Path as ObjectPath,
+    ClientConfigKey, CopyMode, CopyOptions, Error, ObjectStore, ObjectStoreExt, PutMode,
+    PutOptions,
+    azure::{AzureConfigKey, MicrosoftAzureBuilder},
+    buffered::BufWriter,
+    path::Path as ObjectPath,
 };
 use std::{io, path::Path, sync::Arc};
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -33,6 +36,16 @@ impl AzureStore {
             .with_container_name(container)
             .with_credential_type(&config.azure_credential_type)
             .with_allow_http(config.azure_allow_http);
+        // A blob read streams to the client at its pace, so object_store's default
+        // 30s overall timeout would cut large downloads; bound idle reads instead.
+        // AZURE_TIMEOUT and AZURE_READ_TIMEOUT still override both.
+        if std::env::var_os("AZURE_TIMEOUT").is_none() {
+            builder = builder.with_config(AzureConfigKey::Client(ClientConfigKey::Timeout), "1h");
+        }
+        if std::env::var_os("AZURE_READ_TIMEOUT").is_none() {
+            builder =
+                builder.with_config(AzureConfigKey::Client(ClientConfigKey::ReadTimeout), "30s");
+        }
         if let Some(endpoint) = config
             .azure_endpoint
             .as_deref()
