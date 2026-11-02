@@ -17,6 +17,8 @@ config:
   # Reads the URL from a Secret ({name, key}) instead of databaseUrl.
   databaseUrlSecretRef: {}
   databaseMaxConnections: 32
+  # Seconds a request waits for a free database connection.
+  databaseAcquireTimeout: 30
   azureAccount: ""
   azureContainer: ""
   azurePrefix: v1
