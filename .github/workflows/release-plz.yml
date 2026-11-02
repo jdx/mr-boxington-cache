@@ -7,9 +7,9 @@ on:
 
 permissions: {}
 
-# A release or deployment in flight must finish (no cancel). The default queue keeps one
-# pending run and replaces it with the newest: release-plz acts on the SHA it checked out, so
-# stale runs queued from older commits would be wasteful and could build and deploy old state.
+# A release in flight must finish (no cancel). The default queue keeps one pending run and
+# replaces it with the newest: release-plz acts on the SHA it checked out, so stale runs queued
+# from older commits would be wasteful.
 concurrency:
   group: release-plz
   cancel-in-progress: false
@@ -74,155 +74,6 @@ jobs:
       ref: ${{ github.sha }}
       tag: ${{ needs.release.outputs.tag }}
       publish_main: true
-
-  deploy:
-    name: Deploy production
-    needs: image
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 60
-    environment: production
-    concurrency:
-      group: mbx-cache-production
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      CACHE_URL: https://cache.jdx.dev
-      AZURE_SSH_HOST: ${{ vars.AZURE_SSH_HOST }}
-      AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
-      AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER || 'cache' }}
-      MBX_CACHE_DATABASE_PASSWORD: ${{ secrets.MBX_CACHE_DATABASE_PASSWORD }}
-      TS_AUDIENCE: ${{ secrets.TS_AUDIENCE }}
-      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-    steps:
-      - name: Validate deployment configuration
-        run: |
-          missing=()
-          for name in \
-            AZURE_SSH_HOST \
-            AZURE_STORAGE_ACCOUNT \
-            MBX_CACHE_DATABASE_PASSWORD \
-            TS_AUDIENCE \
-            TS_OAUTH_CLIENT_ID; do
-            if [ -z "${!name}" ]; then
-              missing+=("$name")
-            fi
-          done
-          if (( ${#missing[@]} )); then
-            printf '::error::Missing production configuration: %s\n' "${missing[*]}"
-            exit 1
-          fi
-          if [[ ! "$AZURE_STORAGE_ACCOUNT" =~ ^[a-z0-9]{3,24}$ ]]; then
-            echo '::error::AZURE_STORAGE_ACCOUNT must contain 3-24 lowercase letters and digits'
-            exit 1
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
-        with:
-          version: 2026.10.24
-          install: false
-          cache: false
-
-      - name: Join the deployment tailnet
-        id: tailnet
-        uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4.3.0
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          audience: ${{ secrets.TS_AUDIENCE }}
-          tags: tag:mbx-cache-ci
-          ping: ${{ vars.AZURE_SSH_HOST }}
-
-      # Tailscale refuses the exchange when the trust credential's Subject does
-      # not match the claim GitHub actually sends, and that claim appears in no
-      # log on either side. Print it rather than guessing at it.
-      - name: Explain a failed tailnet join
-        if: failure() && steps.tailnet.conclusion == 'failure'
-        env:
-          TS_AUDIENCE: ${{ secrets.TS_AUDIENCE }}
-        run: |
-          set -o pipefail
-          response=$(curl --fail --silent --show-error \
-            --connect-timeout 5 --max-time 15 \
-            --get --data-urlencode "audience=$TS_AUDIENCE" \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL") || exit 0
-          token=$(jq -er '.value | strings | select(length > 0)' <<<"$response") || exit 0
-          echo "::add-mask::$token"
-          payload=$(cut -d. -f2 <<<"$token" | tr '_-' '/+') || exit 0
-          case $(( ${#payload} % 4 )) in
-            2) payload="$payload==" ;;
-            3) payload="$payload=" ;;
-          esac
-          claims=$(base64 -d <<<"$payload" 2>/dev/null) || exit 0
-          echo 'The trust credential at https://login.tailscale.com/admin/settings/trust-credentials'
-          echo 'must accept this Subject, exactly:'
-          jq -r '"  \(.sub)"' <<<"$claims"
-          jq -r '"issuer:      \(.iss)\nrepository:  \(.repository)\nenvironment: \(.environment // "<none>")"' <<<"$claims"
-          if [ "$(jq -r '.aud | if type == "array" then join(",") else . end' <<<"$claims")" = "$TS_AUDIENCE" ]; then
-            echo 'audience:    matches TS_AUDIENCE'
-          else
-            echo 'audience:    does NOT match TS_AUDIENCE, so the credential this'
-            echo '             workflow names and the one it targets have diverged'
-          fi
-          echo 'Joining a tailnet also needs write on the auth_keys scope and the'
-          echo 'tag the workflow advertises.'
-
-      - name: Deploy immutable image
-        env:
-          MBX_CACHE_DEPLOY_GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-          MBX_CACHE_DEPLOY_GITHUB_WORKFLOW_REF: jdx/mr-boxington-cache/.github/workflows/release-plz.yml@refs/heads/main
-          MBX_CACHE_IMAGE: ${{ format('ghcr.io/jdx/mbx-cache@{0}', needs.image.outputs.digest) }}
-        run: |
-          AZURE_SSH_SOURCE_CIDR="$(tailscale ip -4)/32"
-          export AZURE_SSH_SOURCE_CIDR
-          ./deploy/azure/deploy.sh \
-            --ssh-option=StrictHostKeyChecking=accept-new
-
-      - name: Qualify OIDC, PostgreSQL, and Azure Blob Storage
-        env:
-          CACHE_NAMESPACE: jdx/mr-boxington-cache
-        run: |
-          set -o pipefail
-          response=$(curl --fail --silent --show-error \
-            --get \
-            --data-urlencode "audience=$CACHE_URL" \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL")
-          token=$(jq -er '.value | strings | select(length > 0)' <<<"$response")
-          echo "::add-mask::$token"
-
-          temporary_dir=$(mktemp -d "${RUNNER_TEMP}/mbx-cache-qualification.XXXXXXXX")
-          trap 'rm -rf -- "$temporary_dir"' EXIT
-          printf 'mbx-cache production qualification %s %s %s\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            >"$temporary_dir/input"
-          digest=$(sha256sum "$temporary_dir/input" | cut -d ' ' -f 1)
-          size=$(wc -c <"$temporary_dir/input")
-          blob_url="$CACHE_URL/v1/blobs/sha256/$digest/$size"
-          headers=(
-            -H "Authorization: Bearer $token"
-            -H "If-None-Match: *"
-            -H "Mbx-Cache-Namespace: $CACHE_NAMESPACE"
-            -H "Mbx-Cache-Protocol: 1"
-          )
-
-          curl --fail --silent --show-error \
-            "${headers[@]}" \
-            --upload-file "$temporary_dir/input" \
-            "$blob_url"
-          curl --fail --silent --show-error \
-            "${headers[@]}" \
-            --output "$temporary_dir/output" \
-            "$blob_url"
-          cmp "$temporary_dir/input" "$temporary_dir/output"
-          echo "Production cache write/read qualification passed." >> "$GITHUB_STEP_SUMMARY"
 
   publish-release:
     name: Publish GitHub release
