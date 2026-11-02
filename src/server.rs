@@ -1344,6 +1344,9 @@ fn validate_entry(names: &mut HashSet<String>, name: &str, mode: u32) -> Result<
 }
 
 async fn metrics(State(state): State<AppState>) -> Result<Response, ApiError> {
+    if let Some(stats) = state.metadata.pool_stats() {
+        state.metrics.set_database_pool(stats);
+    }
     let body = state.metrics.encode().map_err(ApiError::internal)?;
     Response::builder()
         .status(StatusCode::OK)

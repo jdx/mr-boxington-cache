@@ -28,6 +28,14 @@ pub struct SweepOutcome {
     pub manifests: u64,
 }
 
+/// Connections of a metadata pool, read when metrics are scraped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolStats {
+    pub max: u32,
+    pub open: u32,
+    pub idle: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManifestCommitOutcome {
     Created,
@@ -114,6 +122,10 @@ pub trait MetadataStore: Send + Sync {
     /// Stores without durable metadata have nothing to sweep.
     async fn sweep(&self, _older_than_days: u32) -> anyhow::Result<SweepOutcome> {
         Ok(SweepOutcome::default())
+    }
+    /// Stores without a connection pool have nothing to report.
+    fn pool_stats(&self) -> Option<PoolStats> {
+        None
     }
 }
 
