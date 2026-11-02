@@ -15,13 +15,18 @@ pub struct PostgresMetadata {
 }
 
 impl PostgresMetadata {
-    pub async fn connect(url: &str, max_connections: u32) -> anyhow::Result<Self> {
+    pub async fn connect(
+        url: &str,
+        max_connections: u32,
+        acquire_timeout: std::time::Duration,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             max_connections > 0,
             "database max connections must be at least 1"
         );
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
+            .acquire_timeout(acquire_timeout)
             .connect(url)
             .await?;
         MIGRATOR.run(&pool).await?;
@@ -348,6 +353,7 @@ impl MetadataStore for PostgresMetadata {
 mod tests {
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use super::*;
     use crate::model::Algorithm;
@@ -359,7 +365,7 @@ mod tests {
     async fn store() -> Option<PostgresMetadata> {
         match std::env::var("MBX_CACHE_TEST_DATABASE_URL") {
             Ok(url) => Some(
-                PostgresMetadata::connect(&url, 4)
+                PostgresMetadata::connect(&url, 4, Duration::from_secs(30))
                     .await
                     .expect("the test database should accept connections"),
             ),
@@ -378,13 +384,44 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_connection_pool_is_rejected_before_connecting() {
-        let error = PostgresMetadata::connect("postgres://unreachable.invalid/cache", 0)
-            .await
-            .err()
-            .expect("a zero-sized pool must be rejected");
+        let error = PostgresMetadata::connect(
+            "postgres://unreachable.invalid/cache",
+            0,
+            Duration::from_secs(30),
+        )
+        .await
+        .err()
+        .expect("a zero-sized pool must be rejected");
         assert_eq!(
             error.to_string(),
             "database max connections must be at least 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_gives_up_on_a_full_pool_after_the_acquire_timeout() {
+        if store().await.is_none() {
+            return;
+        }
+        let url = std::env::var("MBX_CACHE_TEST_DATABASE_URL").unwrap();
+        let timeout = Duration::from_millis(200);
+        let store = PostgresMetadata::connect(&url, 1, timeout).await.unwrap();
+        let _held = store.pool.acquire().await.unwrap();
+
+        let started = std::time::Instant::now();
+        let error = store
+            .visible_blobs("test/full-pool", &[test_digest("a", 1)])
+            .await
+            .expect_err("the only connection is held");
+
+        assert!(matches!(
+            error.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::PoolTimedOut)
+        ));
+        assert!(
+            started.elapsed() < timeout * 10,
+            "took {:?}",
+            started.elapsed()
         );
     }
 

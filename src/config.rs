@@ -39,6 +39,16 @@ pub struct Config {
     )]
     pub database_max_connections: u32,
 
+    /// Seconds a metadata request waits for a free PostgreSQL connection
+    /// before it fails. It also bounds the first connection at startup.
+    #[arg(
+        long,
+        env = "MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub database_acquire_timeout: u64,
+
     /// Sweep metadata older than this many days, then exit without serving.
     ///
     /// Object storage expires blobs through a lifecycle rule, which leaves
@@ -131,6 +141,11 @@ mod tests {
     #[test]
     fn rejects_an_empty_database_pool() {
         assert!(Config::try_parse_from(["mbx-cache", "--database-max-connections", "0"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_zero_database_acquire_timeout() {
+        assert!(Config::try_parse_from(["mbx-cache", "--database-acquire-timeout", "0"]).is_err());
     }
 
     #[test]

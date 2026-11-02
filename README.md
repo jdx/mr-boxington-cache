@@ -88,6 +88,7 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_DATA_DIR` | `/var/lib/mbx-cache` | Filesystem blob root |
 | `MBX_CACHE_DATABASE_URL` | `memory://` | PostgreSQL URL or development memory store |
 | `MBX_CACHE_DATABASE_MAX_CONNECTIONS` | `32` | Maximum concurrent PostgreSQL metadata connections |
+| `MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT` | `30` | Seconds a request waits for a free PostgreSQL connection before it fails |
 | `MBX_CACHE_AZURE_ACCOUNT` | — | Required Azure Storage account name |
 | `MBX_CACHE_AZURE_CONTAINER` | — | Required Azure Blob container name |
 | `MBX_CACHE_AZURE_PREFIX` | `v1` | Azure object-key prefix |
