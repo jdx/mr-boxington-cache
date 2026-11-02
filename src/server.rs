@@ -231,6 +231,17 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Drop the row of a blob the metadata lists but storage no longer holds.
+///
+/// A row removed while another upload recreates the object costs one more
+/// upload, which registers the row again.
+async fn forget_missing_blob(metadata: &dyn MetadataStore, namespace: &str, digest: &Digest) {
+    tracing::info!(namespace, hash = %digest.hash, "forgetting a visible blob missing from storage");
+    if let Err(error) = metadata.forget_blob(namespace, digest).await {
+        tracing::warn!(%error, "could not forget a blob missing from storage");
+    }
+}
+
 async fn status() -> impl IntoResponse {
     Json(serde_json::json!({"status":"ok","protocol":PROTOCOL_VERSION}))
 }
@@ -286,12 +297,10 @@ async fn get_blob(
     state
         .access
         .record(&namespace, std::slice::from_ref(&digest));
-    let blob = state
-        .blobs
-        .get(&digest)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::not_found("blob not found"))?;
+    let Some(blob) = state.blobs.get(&digest).await.map_err(ApiError::internal)? else {
+        forget_missing_blob(state.metadata.as_ref(), &namespace, &digest).await;
+        return Err(ApiError::not_found("blob not found"));
+    };
     state.metrics.inc_blob_hit();
     Response::builder()
         .status(StatusCode::OK)
@@ -684,6 +693,7 @@ async fn pack_blobs(
     let mut pack_bytes = BLOB_PACK_MAGIC.len() as u64;
     let mut pack_payload_bytes = 0_u64;
     let store = state.blobs.clone();
+    let metadata = state.metadata.clone();
     let metrics = state.metrics.clone();
     let mut entries = Vec::new();
     for digest in visible {
@@ -709,6 +719,8 @@ async fn pack_blobs(
         yield Bytes::from_static(BLOB_PACK_MAGIC);
         let reads = stream::iter(entries.into_iter().map(|(header, digest)| {
             let store = store.clone();
+            let metadata = metadata.clone();
+            let namespace = namespace.clone();
             let stream_metrics = stream_metrics.clone();
             async move {
                 let started = Instant::now();
@@ -719,6 +731,7 @@ async fn pack_blobs(
                     }
                     Ok(None) => {
                         stream_metrics.observe_pack_storage_get("missing", started.elapsed());
+                        forget_missing_blob(metadata.as_ref(), &namespace, &digest).await;
                         return Err(io::Error::new(io::ErrorKind::NotFound, "visible blob is missing from storage"));
                     }
                     Err(error) => {
@@ -1025,12 +1038,10 @@ async fn validate_tree(state: &AppState, namespace: &str, root: &Digest) -> Resu
         {
             return Err(ApiError::unprocessable("directory object is missing"));
         }
-        let mut blob = state
-            .blobs
-            .get(&digest)
-            .await
-            .map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::unprocessable("directory object is missing"))?;
+        let Some(mut blob) = state.blobs.get(&digest).await.map_err(ApiError::internal)? else {
+            forget_missing_blob(state.metadata.as_ref(), namespace, &digest).await;
+            return Err(ApiError::unprocessable("directory object is missing"));
+        };
         let mut bytes = Vec::with_capacity(digest.size as usize);
         while let Some(chunk) = blob.stream.next().await {
             bytes.extend_from_slice(&chunk.map_err(ApiError::internal)?);
@@ -1393,12 +1404,10 @@ async fn read_canonical_object(
     {
         return Err(ApiError::unprocessable(format!("{label} blob is missing")));
     }
-    let mut blob = state
-        .blobs
-        .get(digest)
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::unprocessable(format!("{label} blob is missing")))?;
+    let Some(mut blob) = state.blobs.get(digest).await.map_err(ApiError::internal)? else {
+        forget_missing_blob(state.metadata.as_ref(), namespace, digest).await;
+        return Err(ApiError::unprocessable(format!("{label} blob is missing")));
+    };
     let mut bytes = Vec::with_capacity(digest.size as usize);
     while let Some(chunk) = blob.stream.next().await {
         bytes.extend_from_slice(&chunk.map_err(ApiError::internal)?);
@@ -2134,6 +2143,50 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.into_body().collect().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reports_blobs_missing_from_storage_as_missing_after_a_read() {
+        let (app, directory) = test_app().await;
+        let served = upload_blob(&app, b"served alone").await;
+        let packed = upload_blob(&app, b"served in a pack").await;
+        for digest in [&served, &packed] {
+            tokio::fs::remove_file(blob_path(directory.path(), digest))
+                .await
+                .unwrap();
+        }
+
+        let uri = format!(
+            "/v1/blobs/{}/{}/{}",
+            served.algorithm, served.hash, served.size
+        );
+        let response = app
+            .clone()
+            .oneshot(request("GET", uri, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = serde_json::to_vec(&serde_json::json!({"digests":[packed]})).unwrap();
+        let response = app
+            .clone()
+            .oneshot(request("POST", "/v1/blobs:pack".into(), Body::from(body)))
+            .await
+            .unwrap();
+        assert!(response.into_body().collect().await.is_err());
+
+        let body = serde_json::to_vec(&serde_json::json!({"digests":[served, packed]})).unwrap();
+        let response = app
+            .oneshot(request(
+                "POST",
+                "/v1/blobs:missing".into(),
+                Body::from(body),
+            ))
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["missing"], serde_json::json!([served, packed]));
     }
 
     #[tokio::test]
@@ -3470,6 +3523,9 @@ mod tests {
             stored: PutOutcome,
         ) -> anyhow::Result<()> {
             self.inner.register_blob(namespace, digest, stored).await
+        }
+        async fn forget_blob(&self, namespace: &str, digest: &Digest) -> anyhow::Result<()> {
+            self.inner.forget_blob(namespace, digest).await
         }
         async fn touch_blobs(&self, namespace: &str, digests: &[Digest]) -> anyhow::Result<()> {
             self.entered.notify_one();

@@ -226,6 +226,20 @@ impl MetadataStore for PostgresMetadata {
         Ok(())
     }
 
+    async fn forget_blob(&self, namespace: &str, digest: &Digest) -> anyhow::Result<()> {
+        sqlx::query(
+            "DELETE FROM namespace_blobs \
+             WHERE namespace = $1 AND algorithm = $2 AND hash = $3 AND size = $4",
+        )
+        .bind(namespace)
+        .bind(digest.algorithm.to_string())
+        .bind(&digest.hash)
+        .bind(digest.size as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn get(&self, namespace: &str, action: &Digest) -> anyhow::Result<Option<ActionResult>> {
         let row = sqlx::query("SELECT result FROM action_results WHERE namespace = $1 AND algorithm = $2 AND hash = $3 AND size = $4")
             .bind(namespace).bind(action.algorithm.to_string()).bind(&action.hash).bind(action.size as i64)
