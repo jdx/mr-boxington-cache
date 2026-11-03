@@ -45,6 +45,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    anyhow::ensure!(
+        config.max_spool_bytes == 0 || config.max_spool_bytes >= config.max_blob_bytes,
+        "--max-spool-bytes must be 0 or at least --max-blob-bytes, or the largest uploads can never be spooled"
+    );
     let blobs = storage::from_config(&config).await?;
     let state = server::AppState::new(
         blobs,
@@ -58,6 +62,7 @@ async fn main() -> Result<()> {
         .await?,
         config.max_blob_bytes,
         config.pack_store_concurrency as usize,
+        config.max_spool_bytes,
     );
     let app = server::router(state);
     let listener = TcpListener::bind(config.listen).await?;

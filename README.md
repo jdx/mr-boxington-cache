@@ -108,6 +108,7 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_ANONYMOUS_READ_NAMESPACES_JSON` | — | Namespace patterns that may be read without authentication; anonymous writes are always denied |
 | `MBX_CACHE_MAX_BLOB_BYTES` | `5368709120` | Maximum upload size |
 | `MBX_CACHE_PACK_STORE_CONCURRENCY` | `8` | Blobs of one uploaded pack stored at the same time |
+| `MBX_CACHE_MAX_SPOOL_BYTES` | `0` | Bytes all uploads may spool in the temp directory at once (`0` = unbounded); at least `MBX_CACHE_MAX_BLOB_BYTES`. Past it, uploads get `503` with `Retry-After` |
 
 AWS credentials use the standard AWS SDK credential chain, including environment variables, workload identity, ECS, and EC2 roles.
 Azure credentials are discovered by the object-store client. The production
