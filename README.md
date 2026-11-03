@@ -297,7 +297,9 @@ It drops blob rows past that age, the action results left referencing them, and
 manifests untouched for that long. Keep the age longer than the storage
 lifecycle so objects go first — reversed, it removes rows for objects that still
 exist and turns cache hits into recompiles. A dangling reference is never fatal:
-a client that cannot fetch a blob treats the action as a miss.
+a client that cannot fetch a blob treats the action as a miss. A read that
+finds a listed blob gone from storage drops that namespace's row for it, so the
+next missing-blob query reports it and the client uploads it again.
 
 Run multiple stateless replicas against the same PostgreSQL database and object
 store. Readiness and liveness probes use `/v1/status`. Scrape `/metrics` with

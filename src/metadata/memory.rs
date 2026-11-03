@@ -44,6 +44,14 @@ impl MetadataStore for MemoryMetadata {
         Ok(())
     }
 
+    async fn forget_blob(&self, namespace: &str, digest: &Digest) -> anyhow::Result<()> {
+        self.blobs
+            .write()
+            .expect("metadata lock poisoned")
+            .remove(&(namespace.to_owned(), digest.clone()));
+        Ok(())
+    }
+
     async fn get(&self, namespace: &str, action: &Digest) -> anyhow::Result<Option<ActionResult>> {
         let entries = self.entries.read().expect("metadata lock poisoned");
         entries

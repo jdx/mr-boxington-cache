@@ -70,6 +70,13 @@ pub trait MetadataStore: Send + Sync {
         digest: &Digest,
         stored: PutOutcome,
     ) -> anyhow::Result<()>;
+    /// Forget that a namespace holds a blob storage no longer has.
+    ///
+    /// A lifecycle rule or an operator can delete an object while its row
+    /// still says it is there, and a client told a blob exists never uploads
+    /// it again. Dropping the row makes the next missing-blob query report it,
+    /// whatever the retention and sweep ages are.
+    async fn forget_blob(&self, namespace: &str, digest: &Digest) -> anyhow::Result<()>;
     /// Record that these blobs were served to a client.
     ///
     /// `namespace_blobs.last_accessed_at` otherwise only ever holds the time a
