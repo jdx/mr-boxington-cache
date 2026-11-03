@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use aws_sdk_s3::{Client, primitives::ByteStream};
+use aws_sdk_s3::{Client, error::ProvideErrorMetadata, primitives::ByteStream};
 use futures_util::StreamExt;
 use std::path::Path;
 use tokio_util::io::ReaderStream;
@@ -52,6 +52,13 @@ impl BlobStore for S3Store {
             .await
         {
             Ok(output) => output,
+            // Also a 404, but a missing bucket says nothing about the object,
+            // and reporting it missing would make the server forget its row.
+            Err(error)
+                if error.as_service_error().and_then(|e| e.code()) == Some("NoSuchBucket") =>
+            {
+                return Err(error.into());
+            }
             Err(error)
                 if error.as_service_error().is_some_and(|e| e.is_no_such_key())
                     || error
