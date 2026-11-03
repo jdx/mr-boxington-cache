@@ -59,6 +59,14 @@ impl BlobStore for FilesystemStore {
         let staging =
             tempfile::NamedTempFile::new_in(destination.parent().expect("blob path has parent"))?;
         tokio::fs::copy(source, staging.path()).await?;
+        // Without this, a crash can leave the rename durable but the data not,
+        // and a truncated file under its final name is never replaced: every
+        // later put sees it and answers AlreadyExists. The handle opened before
+        // the copy also reports write errors the copy's own handle hit, and it
+        // is writable, which Windows needs to flush.
+        tokio::fs::File::from_std(staging.as_file().try_clone()?)
+            .sync_all()
+            .await?;
         match staging.persist_noclobber(&destination) {
             Ok(_) => Ok(PutOutcome::Created),
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
