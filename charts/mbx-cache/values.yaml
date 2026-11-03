@@ -33,6 +33,9 @@ config:
   s3Endpoint: ""
   s3PathStyle: false
   maxBlobBytes: "5368709120"
+  # Bytes uploads may spool in /tmp at once (0 = unbounded); at least
+  # maxBlobBytes. The /tmp emptyDir is capped 1 GiB above it.
+  maxSpoolBytes: "10737418240"
 secret:
   existingSecret: mbx-cache
   tokensKey: tokens-json
