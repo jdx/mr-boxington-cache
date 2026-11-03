@@ -223,6 +223,8 @@ write_dotenv() {
   write_dotenv MBX_CACHE_DATABASE_URL \
     "postgres://mbx_cache:$MBX_CACHE_DATABASE_PASSWORD@postgres/mbx_cache"
   write_dotenv MBX_CACHE_DATABASE_MAX_CONNECTIONS 32
+  # The spool shares the VM disk with PostgreSQL.
+  write_dotenv MBX_CACHE_MAX_SPOOL_BYTES 10737418240
   write_dotenv MBX_CACHE_AZURE_ACCOUNT "$AZURE_STORAGE_ACCOUNT"
   write_dotenv MBX_CACHE_AZURE_CONTAINER "$storage_container"
   write_dotenv MBX_CACHE_AZURE_PREFIX v1

@@ -132,6 +132,11 @@ pub struct Config {
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub pack_store_concurrency: u32,
+
+    /// Bytes all uploads may hold spooled in the temp directory at once; 0
+    /// leaves it unbounded. An upload past it gets 503 and Retry-After.
+    #[arg(long, env = "MBX_CACHE_MAX_SPOOL_BYTES", default_value_t = 0)]
+    pub max_spool_bytes: u64,
 }
 
 #[cfg(test)]

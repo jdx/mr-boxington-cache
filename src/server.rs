@@ -23,7 +23,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
-use tokio::io::AsyncWriteExt;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 use tower_http::{
     compression::{CompressionLayer, CompressionLevel},
     decompression::RequestDecompressionLayer,
@@ -62,6 +65,7 @@ pub struct AppState {
     pub auth: Authorizer,
     pub max_blob_bytes: u64,
     pub pack_store_concurrency: usize,
+    spool: SpoolBudget,
     metrics: Arc<Metrics>,
     access: Arc<PendingAccess>,
 }
@@ -73,6 +77,7 @@ impl AppState {
         auth: Authorizer,
         max_blob_bytes: u64,
         pack_store_concurrency: usize,
+        max_spool_bytes: u64,
     ) -> Self {
         let access = Arc::new(PendingAccess {
             metadata: metadata.clone(),
@@ -85,9 +90,44 @@ impl AppState {
             auth,
             max_blob_bytes,
             pack_store_concurrency,
+            spool: SpoolBudget::new(max_spool_bytes),
             metrics: Arc::new(Metrics::new()),
             access,
         }
+    }
+}
+
+/// Bytes uploads may hold spooled on local disk at once, counted in KiB.
+///
+/// An upload reserves its declared size before it writes a byte, and a full
+/// budget refuses it rather than queueing it: a waiting upload would still
+/// hold its connection, and the disk the spool shares may be the database's.
+#[derive(Clone)]
+struct SpoolBudget(Option<Arc<Semaphore>>);
+
+impl SpoolBudget {
+    /// No budget when `max_bytes` is zero.
+    fn new(max_bytes: u64) -> Self {
+        Self((max_bytes > 0).then(|| {
+            let permits = usize::try_from(max_bytes.div_ceil(1024))
+                .unwrap_or(usize::MAX)
+                .min(Semaphore::MAX_PERMITS);
+            Arc::new(Semaphore::new(permits))
+        }))
+    }
+
+    /// Hold room for `bytes` until the returned permit drops.
+    fn reserve(&self, bytes: u64) -> Result<Option<OwnedSemaphorePermit>, ApiError> {
+        let Some(semaphore) = &self.0 else {
+            return Ok(None);
+        };
+        let permits = u32::try_from(bytes.div_ceil(1024))
+            .map_err(|_| ApiError::too_large("blob exceeds the upload spool"))?;
+        semaphore
+            .clone()
+            .try_acquire_many_owned(permits)
+            .map(Some)
+            .map_err(|_| ApiError::unavailable("upload spool is full, retry later"))
     }
 }
 
@@ -324,6 +364,7 @@ async fn put_blob(
     if digest.size > state.max_blob_bytes {
         return Err(ApiError::too_large("blob exceeds configured limit"));
     }
+    let _spool = state.spool.reserve(digest.size)?;
     let temp = NamedTempFile::new().map_err(ApiError::internal)?;
     let path = temp.path().to_owned();
     let mut file = tokio::fs::File::create(&path)
@@ -431,7 +472,8 @@ async fn put_blob_pack(
             for event in reader.push(&chunk).map_err(pack_error)? {
                 match event {
                     PackEvent::Started(digest) => {
-                        frame = Some(PackFrame::new(digest).await?);
+                        let spool = state.spool.reserve(digest.size)?;
+                        frame = Some(PackFrame::new(digest, spool).await?);
                     }
                     PackEvent::Payload(payload) => {
                         frame
@@ -505,11 +547,13 @@ struct PackFrame {
     size: u64,
     blake3: blake3::Hasher,
     sha256: sha2::Sha256,
+    /// Last, so it is released after `temp` removes the spooled file.
+    _spool: Option<OwnedSemaphorePermit>,
 }
 
 impl PackFrame {
     /// Start spooling and hashing the payload declared by one frame header.
-    async fn new(digest: Digest) -> Result<Self, ApiError> {
+    async fn new(digest: Digest, spool: Option<OwnedSemaphorePermit>) -> Result<Self, ApiError> {
         let temp = NamedTempFile::new().map_err(ApiError::internal)?;
         let file = tokio::fs::File::create(temp.path())
             .await
@@ -521,6 +565,7 @@ impl PackFrame {
             size: 0,
             blake3: blake3::Hasher::new(),
             sha256: sha2::Sha256::new(),
+            _spool: spool,
         })
     }
 
@@ -1580,6 +1625,9 @@ impl ApiError {
     pub fn too_large(message: impl ToString) -> Self {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, message)
     }
+    pub fn unavailable(message: impl ToString) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
+    }
     pub fn unprocessable(message: impl ToString) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, message)
     }
@@ -1650,7 +1698,7 @@ mod tests {
         let metadata = Arc::new(MemoryMetadata::default());
         let auth = Authorizer::new(None, None, true, None).await.unwrap();
         (
-            router(AppState::new(blobs, metadata, auth, 1024 * 1024, 8)),
+            router(AppState::new(blobs, metadata, auth, 1024 * 1024, 8, 0)),
             directory,
         )
     }
@@ -1896,9 +1944,26 @@ mod tests {
         let metadata = Arc::new(MemoryMetadata::default());
         let auth = Authorizer::new(None, None, true, None).await.unwrap();
         (
-            router(AppState::new(blobs, metadata, auth, max_blob_bytes, 8)),
+            router(AppState::new(blobs, metadata, auth, max_blob_bytes, 8, 0)),
             directory,
         )
+    }
+
+    #[test]
+    fn refuses_uploads_past_the_spool_budget_until_room_frees() {
+        let Ok(None) = SpoolBudget::new(0).reserve(u64::MAX) else {
+            panic!("a zero budget is unbounded");
+        };
+        let budget = SpoolBudget::new(3 * 1024);
+        let Ok(first) = budget.reserve(2 * 1024) else {
+            panic!("the first upload fits");
+        };
+        let Err(refused) = budget.reserve(2 * 1024) else {
+            panic!("the second upload does not fit");
+        };
+        assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+        drop(first);
+        assert!(budget.reserve(2 * 1024).is_ok());
     }
 
     #[tokio::test]
@@ -2734,7 +2799,14 @@ mod tests {
         let metadata = Arc::new(MemoryMetadata::default());
         let auth = Authorizer::new(None, None, true, None).await.unwrap();
         (
-            router(AppState::new(blobs.clone(), metadata, auth, 1024 * 1024, 8)),
+            router(AppState::new(
+                blobs.clone(),
+                metadata,
+                auth,
+                1024 * 1024,
+                8,
+                0,
+            )),
             blobs,
             directory,
         )
@@ -3585,7 +3657,7 @@ mod tests {
             ..Default::default()
         });
         let auth = Authorizer::new(None, None, true, None).await.unwrap();
-        let state = AppState::new(blobs, metadata.clone(), auth, 1024 * 1024, 8);
+        let state = AppState::new(blobs, metadata.clone(), auth, 1024 * 1024, 8, 0);
         let app = router(state.clone());
         let digest = upload_blob(&app, b"hot blob").await;
         let uri = format!(
