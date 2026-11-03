@@ -61,12 +61,10 @@ impl BlobStore for FilesystemStore {
         tokio::fs::copy(source, staging.path()).await?;
         // Without this, a crash can leave the rename durable but the data not,
         // and a truncated file under its final name is never replaced: every
-        // later put sees it and answers AlreadyExists.
-        // Write access: Windows refuses to flush a read-only handle.
-        tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(staging.path())
-            .await?
+        // later put sees it and answers AlreadyExists. The handle opened before
+        // the copy also reports write errors the copy's own handle hit, and it
+        // is writable, which Windows needs to flush.
+        tokio::fs::File::from_std(staging.as_file().try_clone()?)
             .sync_all()
             .await?;
         match staging.persist_noclobber(&destination) {
