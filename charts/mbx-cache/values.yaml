@@ -64,10 +64,11 @@ affinity: {}
 serviceMonitor:
   enabled: false
   # Endpoint tlsConfig when tls.secretName is set. Prometheus scrapes the pod
-  # IP, so a DNS-only cert needs serverName and a ca, for example:
+  # IP, so a DNS-only cert needs serverName, plus a ca for a private CA (omit
+  # it for a publicly trusted cert), for example:
   # tlsConfig:
   #   serverName: mbx-cache.cache.svc
-  #   ca: {secret: {name: mbx-tls, key: ca.crt}}
+  #   ca: {secret: {name: mbx-ca, key: ca.crt}}
   tlsConfig: {}
 networkPolicy:
   enabled: true
