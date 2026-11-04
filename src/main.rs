@@ -7,7 +7,7 @@ mod pack;
 mod server;
 mod storage;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use config::Config;
 use tokio::net::TcpListener;
@@ -65,6 +65,30 @@ async fn main() -> Result<()> {
         config.max_spool_bytes,
     );
     let app = server::router(state);
+    if let (Some(cert), Some(key)) = (&config.tls_cert, &config.tls_key) {
+        // rustls has both ring and aws-lc-rs enabled through other crates, so it
+        // cannot pick a default provider on its own.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+            .await
+            .with_context(|| {
+                format!("load TLS cert {} and key {}", cert.display(), key.display())
+            })?;
+        let handle = axum_server::Handle::new();
+        tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                shutdown_signal().await;
+                handle.graceful_shutdown(None);
+            }
+        });
+        info!(address = %config.listen, "mbx-cache listening with TLS");
+        axum_server::bind_rustls(config.listen, tls)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+        return Ok(());
+    }
     let listener = TcpListener::bind(config.listen).await?;
     info!(address = %config.listen, "mbx-cache listening");
     axum::serve(listener, app)

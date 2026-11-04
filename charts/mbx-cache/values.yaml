@@ -36,6 +36,10 @@ config:
   # Bytes uploads may spool in /tmp at once (0 = unbounded); at least
   # maxBlobBytes. The /tmp emptyDir is capped 1 GiB above it.
   maxSpoolBytes: "10737418240"
+# Serve HTTPS from a kubernetes.io/tls Secret (keys tls.crt, tls.key), such as
+# one issued by cert-manager. The cert is read at startup: restart on rotation.
+tls:
+  secretName: ""
 secret:
   existingSecret: mbx-cache
   tokensKey: tokens-json
