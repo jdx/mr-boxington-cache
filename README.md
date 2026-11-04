@@ -55,7 +55,7 @@ mbx-cache \
   --listen 127.0.0.1:8080
 ```
 
-Anonymous access is intended only for a trusted local network. Production installations should terminate TLS at an ingress or proxy and configure tokens.
+Anonymous access is intended only for a trusted local network. Production installations should configure tokens and serve TLS, either at an ingress or proxy or with `--tls-cert` and `--tls-key`.
 
 ## Connect a client
 
@@ -84,6 +84,8 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | Environment variable | Default | Purpose |
 |---|---:|---|
 | `MBX_CACHE_LISTEN` | `0.0.0.0:8080` | Listen address |
+| `MBX_CACHE_TLS_CERT` | unset | Path to a PEM certificate chain file, such as `/etc/mbx-cache/tls/tls.crt`; with `MBX_CACHE_TLS_KEY`, serve HTTPS |
+| `MBX_CACHE_TLS_KEY` | unset | Path to the PEM private key file for `MBX_CACHE_TLS_CERT`, such as `/etc/mbx-cache/tls/tls.key` |
 | `MBX_CACHE_STORAGE` | `filesystem` | `filesystem`, `s3`, `azure`, or `gcs` |
 | `MBX_CACHE_DATA_DIR` | `/var/lib/mbx-cache` | Filesystem blob root |
 | `MBX_CACHE_DATABASE_URL` | `memory://` | PostgreSQL URL or development memory store |

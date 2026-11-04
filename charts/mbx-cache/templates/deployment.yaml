@@ -50,6 +50,10 @@ spec:
             {{- end }}
             - {name: MBX_CACHE_MAX_BLOB_BYTES, value: {{ .Values.config.maxBlobBytes | quote }}}
             - {name: MBX_CACHE_MAX_SPOOL_BYTES, value: {{ .Values.config.maxSpoolBytes | quote }}}
+            {{- if .Values.tls.secretName }}
+            - {name: MBX_CACHE_TLS_CERT, value: /etc/mbx-cache/tls/tls.crt}
+            - {name: MBX_CACHE_TLS_KEY, value: /etc/mbx-cache/tls/tls.key}
+            {{- end }}
             - name: MBX_CACHE_TOKENS_JSON
               valueFrom: {secretKeyRef: {name: {{ .Values.secret.existingSecret }}, key: {{ .Values.secret.tokensKey }}, optional: true}}
             - name: MBX_CACHE_OIDC_PROVIDERS_JSON
@@ -60,11 +64,20 @@ spec:
           {{- with .Values.envFrom }}
           envFrom: {{- toYaml . | nindent 12 }}
           {{- end }}
-          readinessProbe: {httpGet: {path: /v1/status, port: http}, initialDelaySeconds: 2}
-          livenessProbe: {httpGet: {path: /v1/status, port: http}, initialDelaySeconds: 5}
+          {{- $scheme := ternary "HTTPS" "HTTP" (not (empty .Values.tls.secretName)) }}
+          readinessProbe: {httpGet: {path: /v1/status, port: http, scheme: {{ $scheme }}}, initialDelaySeconds: 2}
+          livenessProbe: {httpGet: {path: /v1/status, port: http, scheme: {{ $scheme }}}, initialDelaySeconds: 5}
           resources: {{ toYaml .Values.resources | nindent 12 }}
-          volumeMounts: [{name: tmp, mountPath: /tmp}]
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.tls.secretName }}
+            - {name: tls, mountPath: /etc/mbx-cache/tls, readOnly: true}
+            {{- end }}
       volumes:
+        {{- with .Values.tls.secretName }}
+        - name: tls
+          secret: {secretName: {{ . | quote }}}
+        {{- end }}
         - name: tmp
           {{- if eq (toString .Values.config.maxSpoolBytes) "0" }}
           emptyDir: {}

@@ -36,6 +36,10 @@ config:
   # Bytes uploads may spool in /tmp at once (0 = unbounded); at least
   # maxBlobBytes. The /tmp emptyDir is capped 1 GiB above it.
   maxSpoolBytes: "10737418240"
+# Serve HTTPS from a kubernetes.io/tls Secret (keys tls.crt, tls.key), such as
+# one issued by cert-manager. The cert is read at startup: restart on rotation.
+tls:
+  secretName: ""
 secret:
   existingSecret: mbx-cache
   tokensKey: tokens-json
@@ -59,5 +63,12 @@ tolerations: []
 affinity: {}
 serviceMonitor:
   enabled: false
+  # Endpoint tlsConfig when tls.secretName is set. Prometheus scrapes the pod
+  # IP, so a DNS-only cert needs serverName, plus a ca for a private CA (omit
+  # it for a publicly trusted cert), for example:
+  # tlsConfig:
+  #   serverName: mbx-cache.cache.svc
+  #   ca: {secret: {name: mbx-ca, key: ca.crt}}
+  tlsConfig: {}
 networkPolicy:
   enabled: true

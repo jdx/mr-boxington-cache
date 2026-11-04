@@ -16,6 +16,15 @@ pub struct Config {
     #[arg(long, env = "MBX_CACHE_LISTEN", default_value = "0.0.0.0:8080")]
     pub listen: SocketAddr,
 
+    /// Path to a PEM certificate chain file. With `--tls-key`, serve HTTPS
+    /// instead of HTTP.
+    #[arg(long, env = "MBX_CACHE_TLS_CERT", requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Path to the PEM private key file for `--tls-cert`.
+    #[arg(long, env = "MBX_CACHE_TLS_KEY", requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+
     #[arg(
         long,
         env = "MBX_CACHE_STORAGE",
@@ -151,6 +160,12 @@ mod tests {
     #[test]
     fn rejects_a_zero_database_acquire_timeout() {
         assert!(Config::try_parse_from(["mbx-cache", "--database-acquire-timeout", "0"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_tls_cert_without_a_key() {
+        assert!(Config::try_parse_from(["mbx-cache", "--tls-cert", "cert.pem"]).is_err());
+        assert!(Config::try_parse_from(["mbx-cache", "--tls-key", "key.pem"]).is_err());
     }
 
     #[test]

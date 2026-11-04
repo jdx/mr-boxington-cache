@@ -6,5 +6,13 @@ metadata:
 spec:
   selector:
     matchLabels: {app.kubernetes.io/name: mbx-cache, app.kubernetes.io/instance: {{ .Release.Name }}}
-  endpoints: [{port: http, path: /metrics}]
+  endpoints:
+    - port: http
+      path: /metrics
+      {{- if .Values.tls.secretName }}
+      scheme: https
+      {{- with .Values.serviceMonitor.tlsConfig }}
+      tlsConfig: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
 {{- end }}
