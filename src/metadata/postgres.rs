@@ -476,9 +476,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "fails until sqlx stops yielding per PBKDF2 round; needs a SCRAM-authenticated MBX_CACHE_TEST_DATABASE_URL"]
     async fn a_new_connection_opens_quickly_on_a_busy_runtime() {
-        let Ok(url) = std::env::var("MBX_CACHE_TEST_DATABASE_URL") else {
-            return;
-        };
+        let url = std::env::var("MBX_CACHE_TEST_DATABASE_URL")
+            .expect("set MBX_CACHE_TEST_DATABASE_URL to run this reproduction");
         let pool = PgPoolOptions::new().connect_lazy(&url).unwrap();
         let busy = (0..4)
             .map(|_| {
