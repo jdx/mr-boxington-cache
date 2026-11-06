@@ -29,6 +29,11 @@ impl PostgresMetadata {
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(acquire_timeout)
+            // A request that finds an expired connection opens the next one itself, and
+            // sqlx's SCRAM handshake can outlast the acquire timeout on a busy runtime
+            // (see `a_new_connection_opens_quickly_on_a_busy_runtime`). Keep them open.
+            .idle_timeout(None)
+            .max_lifetime(None)
             .connect(url)
             .await?;
         MIGRATOR.run(&pool).await?;
@@ -461,6 +466,53 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    /// sqlx's SCRAM `hi()` calls `yield_now` every 5 of its 4096 PBKDF2
+    /// iterations. Tokio wakes a yielded task only on the worker's next driver
+    /// tick (every 61 polls when busy), so a connect costs about
+    /// 819 × 61 × (one poll of the other tasks): 10s here, past the 30s
+    /// acquire timeout once polls take about 600µs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "fails until sqlx stops yielding per PBKDF2 round; needs a SCRAM-authenticated MBX_CACHE_TEST_DATABASE_URL"]
+    async fn a_new_connection_opens_quickly_on_a_busy_runtime() {
+        let url = std::env::var("MBX_CACHE_TEST_DATABASE_URL")
+            .expect("set MBX_CACHE_TEST_DATABASE_URL to run this reproduction");
+        let pool = PgPoolOptions::new().connect_lazy(&url).unwrap();
+        let busy = (0..4)
+            .map(|_| {
+                tokio::spawn(async {
+                    loop {
+                        let slice = std::time::Instant::now();
+                        while slice.elapsed() < Duration::from_micros(200) {
+                            std::hint::spin_loop();
+                        }
+                        // Unlike `yield_now`, a direct wake requeues the task at once.
+                        let mut woken = false;
+                        std::future::poll_fn(|cx| {
+                            if std::mem::replace(&mut woken, true) {
+                                std::task::Poll::Ready(())
+                            } else {
+                                cx.waker().wake_by_ref();
+                                std::task::Poll::Pending
+                            }
+                        })
+                        .await;
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let started = std::time::Instant::now();
+        // Spawned, because the test body runs outside the runtime's workers.
+        let opened = tokio::spawn(async move { pool.acquire().await.map(drop) })
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        busy.iter().for_each(tokio::task::JoinHandle::abort);
+
+        opened.unwrap();
+        assert!(elapsed < Duration::from_secs(2), "connect took {elapsed:?}");
     }
 
     /// A namespace no other test shares, so one database serves them all.

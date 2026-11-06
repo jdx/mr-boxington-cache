@@ -308,6 +308,10 @@ Run multiple stateless replicas against the same PostgreSQL database and object
 store. Readiness and liveness probes use `/v1/status`. Scrape `/metrics` with
 Prometheus.
 
+Each replica keeps every PostgreSQL connection it opens until it exits, up to
+`MBX_CACHE_DATABASE_MAX_CONNECTIONS`. Set PostgreSQL's `max_connections` above
+replicas × that value, plus what other clients need.
+
 The OpenMetrics endpoint exposes the existing action and blob counters plus detailed blob-pack telemetry:
 
 - accepted pack streams by `completed`, `cancelled`, or `error` outcome
