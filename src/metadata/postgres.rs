@@ -500,9 +500,15 @@ mod tests {
 
         drop(first);
         drop(second);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (store.pool.size() > 1 || store.pool.num_idle() == 0)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         assert_eq!(store.pool.size(), 1);
+        assert_eq!(store.pool.num_idle(), 1);
     }
 
     #[tokio::test]
