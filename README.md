@@ -315,9 +315,12 @@ above replicas × that value, plus what other clients need.
 
 A connection older than `MBX_CACHE_DATABASE_MAX_LIFETIME` (30 minutes by
 default) closes when it is released, and the next request that needs one opens
-a replacement. At most one connection closes per
-`MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT`, so connections opened together do not all
-reconnect together: opening a connection can take seconds on a busy replica.
+a replacement. Opening a connection can take seconds on a busy replica, so
+expiry is spaced rather than jittered: at most one connection closes per
+`MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT`, and the others wait their turn. Connections
+opened in the same burst therefore do not all reconnect at the same time. A
+connection can outlive the lifetime by up to max connections × acquire timeout
+(32 minutes with the defaults).
 
 `MBX_CACHE_DATABASE_MAX_LIFETIME=0` keeps connections open until the replica
 exits and removes those reconnects. Tune PostgreSQL first. A backend's `malloc`
