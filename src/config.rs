@@ -58,6 +58,15 @@ pub struct Config {
     )]
     pub database_acquire_timeout: u64,
 
+    /// Seconds after which a PostgreSQL connection is closed and replaced.
+    /// Unset keeps connections open until the process exits.
+    #[arg(
+        long,
+        env = "MBX_CACHE_DATABASE_MAX_LIFETIME",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub database_max_lifetime: Option<u64>,
+
     /// Sweep metadata older than this many days, then exit without serving.
     ///
     /// Object storage expires blobs through a lifecycle rule, which leaves
@@ -160,6 +169,11 @@ mod tests {
     #[test]
     fn rejects_a_zero_database_acquire_timeout() {
         assert!(Config::try_parse_from(["mbx-cache", "--database-acquire-timeout", "0"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_zero_database_max_lifetime() {
+        assert!(Config::try_parse_from(["mbx-cache", "--database-max-lifetime", "0"]).is_err());
     }
 
     #[test]

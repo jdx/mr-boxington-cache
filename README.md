@@ -91,6 +91,7 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_DATABASE_URL` | `memory://` | PostgreSQL URL or development memory store |
 | `MBX_CACHE_DATABASE_MAX_CONNECTIONS` | `32` | Maximum concurrent PostgreSQL metadata connections |
 | `MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT` | `30` | Seconds a request waits for a free PostgreSQL connection before it fails |
+| `MBX_CACHE_DATABASE_MAX_LIFETIME` | unset | Seconds after which a PostgreSQL connection is closed and replaced; unset keeps it open |
 | `MBX_CACHE_AZURE_ACCOUNT` | — | Required Azure Storage account name |
 | `MBX_CACHE_AZURE_CONTAINER` | — | Required Azure Blob container name |
 | `MBX_CACHE_AZURE_PREFIX` | `v1` | Azure object-key prefix |
@@ -308,9 +309,27 @@ Run multiple stateless replicas against the same PostgreSQL database and object
 store. Readiness and liveness probes use `/v1/status`. Scrape `/metrics` with
 Prometheus.
 
-Each replica keeps every PostgreSQL connection it opens until it exits, up to
-`MBX_CACHE_DATABASE_MAX_CONNECTIONS`. Set PostgreSQL's `max_connections` above
+By default, each replica keeps every PostgreSQL connection it opens until it
+exits, up to `MBX_CACHE_DATABASE_MAX_CONNECTIONS`. Set PostgreSQL's `max_connections` above
 replicas × that value, plus what other clients need.
+
+Size PostgreSQL's memory for that many long-lived backends, not for one query.
+A backend's `malloc` heap can keep memory after PostgreSQL frees it, so an idle
+backend can hold tens of MiB. Settings that reduce it:
+
+- `jit = off` in `postgresql.conf`. The cache's queries are short, so JIT adds
+  per-backend memory for no gain.
+- `MALLOC_MMAP_THRESHOLD_=131072` in the PostgreSQL server's environment (glibc
+  only; for CloudNativePG, the Cluster's `spec.env`). glibc then always uses
+  `mmap` for allocations of 128 KiB or more and returns them to the system when
+  they are freed. Without it, glibc raises that threshold after large frees and
+  keeps later large allocations in the heap.
+- `MBX_CACHE_DATABASE_MAX_LIFETIME`, when the two above are not enough. A
+  connection past this age closes when it is released, and the next request
+  that needs one opens a replacement. At most one connection closes per
+  `MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT`, so connections opened together do not
+  all reconnect together. Opening a connection can take seconds on a busy
+  replica, so keep the lifetime in hours.
 
 The OpenMetrics endpoint exposes the existing action and blob counters plus detailed blob-pack telemetry:
 
