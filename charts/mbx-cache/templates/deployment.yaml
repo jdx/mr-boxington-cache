@@ -29,9 +29,7 @@ spec:
             {{- end }}
             - {name: MBX_CACHE_DATABASE_MAX_CONNECTIONS, value: {{ .Values.config.databaseMaxConnections | quote }}}
             - {name: MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT, value: {{ .Values.config.databaseAcquireTimeout | quote }}}
-            {{- with .Values.config.databaseMaxLifetime }}
-            - {name: MBX_CACHE_DATABASE_MAX_LIFETIME, value: {{ . | quote }}}
-            {{- end }}
+            - {name: MBX_CACHE_DATABASE_MAX_LIFETIME, value: {{ .Values.config.databaseMaxLifetime | quote }}}
             {{- if eq .Values.config.storage "azure" }}
             - {name: MBX_CACHE_AZURE_ACCOUNT, value: {{ required "config.azureAccount is required for Azure storage" .Values.config.azureAccount | quote }}}
             - {name: MBX_CACHE_AZURE_CONTAINER, value: {{ required "config.azureContainer is required for Azure storage" .Values.config.azureContainer | quote }}}

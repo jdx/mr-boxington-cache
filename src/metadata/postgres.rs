@@ -32,7 +32,8 @@ impl PostgresMetadata {
             .acquire_timeout(acquire_timeout)
             // A request that finds an expired connection opens the next one itself, and
             // sqlx's SCRAM handshake can outlast the acquire timeout on a busy runtime
-            // (see `a_new_connection_opens_quickly_on_a_busy_runtime`). Keep them open.
+            // (see `a_new_connection_opens_quickly_on_a_busy_runtime`). sqlx's reaper
+            // would close them in batches, so only the hook below closes connections.
             .idle_timeout(None)
             .max_lifetime(None);
         if let Some(lifetime) = max_lifetime {
