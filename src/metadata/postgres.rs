@@ -21,23 +21,66 @@ impl PostgresMetadata {
         url: &str,
         max_connections: u32,
         acquire_timeout: std::time::Duration,
+        max_lifetime: Option<std::time::Duration>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             max_connections > 0,
             "database max connections must be at least 1"
         );
-        let pool = PgPoolOptions::new()
+        let mut options = PgPoolOptions::new()
             .max_connections(max_connections)
             .acquire_timeout(acquire_timeout)
             // A request that finds an expired connection opens the next one itself, and
             // sqlx's SCRAM handshake can outlast the acquire timeout on a busy runtime
-            // (see `a_new_connection_opens_quickly_on_a_busy_runtime`). Keep them open.
+            // (see `a_new_connection_opens_quickly_on_a_busy_runtime`). sqlx's reaper
+            // would close them in batches, so only the hook below closes connections.
             .idle_timeout(None)
-            .max_lifetime(None)
-            .connect(url)
-            .await?;
+            .max_lifetime(None);
+        if let Some(lifetime) = max_lifetime {
+            // sqlx's own `max_lifetime` would close every connection opened in one
+            // burst at the same time, and the requests that follow would all reconnect.
+            // One retirement per acquire timeout keeps that to one slow connect at a time.
+            let retirement = Retirement::new(lifetime, acquire_timeout);
+            options = options.after_release(move |_, meta| {
+                let keep = !retirement.should_retire(meta.age);
+                Box::pin(async move { Ok(keep) })
+            });
+        }
+        let pool = options.connect(url).await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
+    }
+}
+
+/// Picks connections past their lifetime to close, at most one per `spacing`.
+struct Retirement {
+    lifetime: std::time::Duration,
+    spacing: std::time::Duration,
+    last: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl Retirement {
+    fn new(lifetime: std::time::Duration, spacing: std::time::Duration) -> Self {
+        Self {
+            lifetime,
+            spacing,
+            last: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn should_retire(&self, age: std::time::Duration) -> bool {
+        if age < self.lifetime {
+            return false;
+        }
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < self.spacing) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        true
     }
 }
 
@@ -394,7 +437,7 @@ mod tests {
     async fn store() -> Option<PostgresMetadata> {
         match std::env::var("MBX_CACHE_TEST_DATABASE_URL") {
             Ok(url) => Some(
-                PostgresMetadata::connect(&url, 4, Duration::from_secs(30))
+                PostgresMetadata::connect(&url, 4, Duration::from_secs(30), None)
                     .await
                     .expect("the test database should accept connections"),
             ),
@@ -417,6 +460,7 @@ mod tests {
             "postgres://unreachable.invalid/cache",
             0,
             Duration::from_secs(30),
+            None,
         )
         .await
         .err()
@@ -425,6 +469,46 @@ mod tests {
             error.to_string(),
             "database max connections must be at least 1"
         );
+    }
+
+    #[test]
+    fn retires_expired_connections_one_per_spacing() {
+        let retirement = Retirement::new(Duration::from_secs(60), Duration::from_millis(50));
+        let expired = Duration::from_secs(61);
+
+        assert!(!retirement.should_retire(Duration::from_secs(59)));
+        assert!(retirement.should_retire(expired));
+        assert!(!retirement.should_retire(expired));
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(retirement.should_retire(expired));
+    }
+
+    #[tokio::test]
+    async fn a_released_connection_past_its_lifetime_is_closed_one_at_a_time() {
+        if store().await.is_none() {
+            return;
+        }
+        let url = std::env::var("MBX_CACHE_TEST_DATABASE_URL").unwrap();
+        let spacing = Duration::from_millis(500);
+        let store = PostgresMetadata::connect(&url, 2, spacing, Some(Duration::from_millis(1)))
+            .await
+            .unwrap();
+        let first = store.pool.acquire().await.unwrap();
+        let second = store.pool.acquire().await.unwrap();
+        // Releasing the migration's connection already took one retirement.
+        tokio::time::sleep(spacing).await;
+
+        drop(first);
+        drop(second);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (store.pool.size() > 1 || store.pool.num_idle() == 0)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(store.pool.size(), 1);
+        assert_eq!(store.pool.num_idle(), 1);
     }
 
     #[tokio::test]
@@ -448,7 +532,9 @@ mod tests {
         }
         let url = std::env::var("MBX_CACHE_TEST_DATABASE_URL").unwrap();
         let timeout = Duration::from_millis(200);
-        let store = PostgresMetadata::connect(&url, 1, timeout).await.unwrap();
+        let store = PostgresMetadata::connect(&url, 1, timeout, None)
+            .await
+            .unwrap();
         let _held = store.pool.acquire().await.unwrap();
 
         let started = std::time::Instant::now();

@@ -58,6 +58,11 @@ pub struct Config {
     )]
     pub database_acquire_timeout: u64,
 
+    /// Seconds after which a PostgreSQL connection is closed and replaced.
+    /// 0 keeps connections open until the process exits.
+    #[arg(long, env = "MBX_CACHE_DATABASE_MAX_LIFETIME", default_value_t = 1800)]
+    pub database_max_lifetime: u64,
+
     /// Sweep metadata older than this many days, then exit without serving.
     ///
     /// Object storage expires blobs through a lifecycle rule, which leaves

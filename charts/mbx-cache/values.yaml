@@ -19,6 +19,8 @@ config:
   databaseMaxConnections: 32
   # Seconds a request waits for a free database connection.
   databaseAcquireTimeout: 30
+  # Seconds after which a database connection is replaced; 0 keeps it open.
+  databaseMaxLifetime: 1800
   azureAccount: ""
   azureContainer: ""
   azurePrefix: v1

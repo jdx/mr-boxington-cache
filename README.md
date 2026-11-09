@@ -91,6 +91,7 @@ Every option has a matching environment variable and CLI flag. Run `mbx-cache --
 | `MBX_CACHE_DATABASE_URL` | `memory://` | PostgreSQL URL or development memory store |
 | `MBX_CACHE_DATABASE_MAX_CONNECTIONS` | `32` | Maximum concurrent PostgreSQL metadata connections |
 | `MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT` | `30` | Seconds a request waits for a free PostgreSQL connection before it fails |
+| `MBX_CACHE_DATABASE_MAX_LIFETIME` | `1800` | Seconds after which a PostgreSQL connection is closed and replaced; `0` keeps it open |
 | `MBX_CACHE_AZURE_ACCOUNT` | — | Required Azure Storage account name |
 | `MBX_CACHE_AZURE_CONTAINER` | — | Required Azure Blob container name |
 | `MBX_CACHE_AZURE_PREFIX` | `v1` | Azure object-key prefix |
@@ -308,9 +309,32 @@ Run multiple stateless replicas against the same PostgreSQL database and object
 store. Readiness and liveness probes use `/v1/status`. Scrape `/metrics` with
 Prometheus.
 
-Each replica keeps every PostgreSQL connection it opens until it exits, up to
-`MBX_CACHE_DATABASE_MAX_CONNECTIONS`. Set PostgreSQL's `max_connections` above
-replicas × that value, plus what other clients need.
+Each replica opens up to `MBX_CACHE_DATABASE_MAX_CONNECTIONS` PostgreSQL
+connections and keeps them open while idle. Set PostgreSQL's `max_connections`
+above replicas × that value, plus what other clients need.
+
+A connection older than `MBX_CACHE_DATABASE_MAX_LIFETIME` (30 minutes by
+default) closes when it is released, and the next request that needs one opens
+a replacement. Opening a connection can take seconds on a busy replica, so
+expiry is spaced rather than jittered: at most one connection closes per
+`MBX_CACHE_DATABASE_ACQUIRE_TIMEOUT`, and the others wait their turn. Connections
+opened in the same burst therefore do not all reconnect at the same time. A
+connection can outlive the lifetime by up to max connections × acquire timeout
+(32 minutes with the defaults).
+
+`MBX_CACHE_DATABASE_MAX_LIFETIME=0` keeps connections open until the replica
+exits and removes those reconnects. Tune PostgreSQL first. A backend's `malloc`
+heap can keep memory after PostgreSQL frees it, so a long-lived idle backend
+can hold tens of MiB: size PostgreSQL's memory for that many backends, not for
+one query. Settings that reduce it:
+
+- `jit = off` in `postgresql.conf`. The cache's queries are short, so JIT adds
+  per-backend memory for no gain.
+- `MALLOC_MMAP_THRESHOLD_=131072` in the PostgreSQL server's environment (glibc
+  only; for CloudNativePG, the Cluster's `spec.env`). glibc then always uses
+  `mmap` for allocations of 128 KiB or more and returns them to the system when
+  they are freed. Without it, glibc raises that threshold after large frees and
+  keeps later large allocations in the heap.
 
 The OpenMetrics endpoint exposes the existing action and blob counters plus detailed blob-pack telemetry:
 

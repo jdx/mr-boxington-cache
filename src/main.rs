@@ -34,6 +34,8 @@ async fn main() -> Result<()> {
         &config.database_url,
         config.database_max_connections,
         std::time::Duration::from_secs(config.database_acquire_timeout),
+        (config.database_max_lifetime > 0)
+            .then(|| std::time::Duration::from_secs(config.database_max_lifetime)),
     )
     .await?;
     // A sweep is an operator action, not part of serving: do it and exit rather
