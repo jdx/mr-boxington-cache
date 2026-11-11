@@ -81,6 +81,37 @@ jobs:
             --set config.azureContainer=cache >/dev/null
       - run: shellcheck deploy/azure/deploy.sh deploy/azure/test-deploy.sh
       - run: deploy/azure/test-deploy.sh
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The three-dot diff below needs the merge base.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: taiki-e/install-action@51cd0b8c0499559d9a4d75c0f5c67bec3a894ec8 # v2.75.28
+        with:
+          tool: cargo-deny
+      # Deterministic checks: they only change when this repo does.
+      - run: cargo deny check bans licenses sources
+      # The RustSec advisory DB changes on its own, so an unrelated PR must not
+      # go red because of a new advisory. PRs only check advisories when they
+      # change the dependency graph; pushes to main always do, and the daily
+      # advisories workflow reports new advisories in between.
+      - name: Check advisories
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] &&
+            ! git diff --name-only "$BASE_SHA...$HEAD_SHA" | grep -qE '(^|/)(Cargo\.lock|Cargo\.toml|deny\.toml)$'; then
+            echo "Dependency graph unchanged; skipping the advisory check."
+            exit 0
+          fi
+          rm -rf ~/.cargo/advisory-dbs
+          cargo deny check advisories
   hk:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -150,6 +181,7 @@ jobs:
   final:
     permissions: {}
     needs:
+      - deny
       - deployment
       - hk
       - test
@@ -161,6 +193,7 @@ jobs:
     steps:
       - name: Check job results
         if: |
+          needs.deny.result != 'success' ||
           needs.deployment.result != 'success' ||
           needs.hk.result != 'success' ||
           needs.test.result != 'success'

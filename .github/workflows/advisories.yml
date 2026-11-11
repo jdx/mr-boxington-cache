@@ -1,9 +1,9 @@
 name: advisories
 
-# Nothing else in this repository watches the advisory database. CI runs on
-# push and pull request only, so an advisory published against a dependency of
-# the deployed server would wait for the next commit to surface. This run is
-# the standing watch for that case, and reports by email because a red
+# The RustSec advisory DB changes independently of this repo, so PRs only run
+# `cargo deny check advisories` when they change the dependency graph (see
+# ci.yml). This daily run catches new advisories against main instead, files
+# or updates one tracking issue, and emails on failure, because a red
 # scheduled run nobody looks at is not a notification.
 on:
   workflow_dispatch:
@@ -23,46 +23,86 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: main
           persist-credentials: false
-
-      # Advisories only -- see the note in deny.toml.
-      - id: deny
-        continue-on-error: true
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: taiki-e/install-action@51cd0b8c0499559d9a4d75c0f5c67bec3a894ec8 # v2.75.28
         with:
-          command: check advisories
-
-      - name: Email the advisory report
-        if: steps.deny.outcome == 'failure'
+          tool: cargo-deny
+      # Advisories only -- see the note in deny.toml.
+      - name: Check advisories
+        id: deny
+        run: |
+          set +e
+          rm -rf ~/.cargo/advisory-dbs
+          cargo deny check advisories > "$RUNNER_TEMP/deny.txt" 2>&1
+          status=$?
+          cat "$RUNNER_TEMP/deny.txt"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Open or update tracking issue
+        if: steps.deny.outputs.status != '0'
         env:
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          NOTIFY_FROM: ${{ secrets.NOTIFY_FROM }}
-          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # A missing secret must not masquerade as a clean audit, but it must
-          # not hide the advisory either: warn, and let the failing step below
-          # still turn the run red.
-          if [[ -z "$RESEND_API_KEY" || -z "$NOTIFY_FROM" || -z "$NOTIFY_EMAIL" ]]; then
-            echo "::warning::a notification secret is unset; skipping the advisory email."
+          set -euo pipefail
+          title="cargo-deny: new security advisories"
+          # Cap the output so the body stays under GitHub's size limit.
+          {
+            echo "\`cargo deny check advisories\` failed on \`main\` ([run]($RUN_URL))."
+            echo
+            echo "Fix by updating the affected crate, or ignore the advisory in \`deny.toml\` with a reason."
+            echo
+            echo '```'
+            head -c 50000 "$RUNNER_TEMP/deny.txt"
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
+      - name: Send failure email via Resend
+        if: ${{ !cancelled() && steps.deny.outputs.status != '0' }}
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # A missing secret must not hide the advisory: warn, and let the
+          # failing step below still turn the run red.
+          if [ -z "${RESEND_API_KEY:-}" ] || [ -z "${NOTIFY_EMAIL:-}" ]; then
+            echo "::warning::RESEND_API_KEY or NOTIFY_EMAIL is unset; skipping notification"
             exit 0
           fi
           # jq builds the payload so an advisory title can never break the JSON.
-          payload="$(jq -n \
-            --arg from "$NOTIFY_FROM" \
+          payload=$(jq -n \
             --arg to "$NOTIFY_EMAIL" \
-            --arg subject "cargo-deny found an advisory in ${REPOSITORY}" \
-            --arg html "<p><code>cargo deny check advisories</code> failed on <strong>${REPOSITORY}</strong>.</p><p><a href=\"${RUN_URL}\">View the workflow run</a> for the advisory list.</p>" \
-            '{from: $from, to: [$to], subject: $subject, html: $html}')"
-          curl --fail-with-body -sS -X POST 'https://api.resend.com/emails' \
+            --arg run_url "$RUN_URL" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            '{
+              from: "mr-boxington CI <mise@en.dev>",
+              to: [$to],
+              subject: "❌ \($repo): cargo-deny found new security advisories",
+              html: (
+                "<p><strong>cargo deny check advisories</strong> failed on main.</p>"
+                + "<p><a href=\"\($run_url | @html)\">View workflow run</a> | <a href=\"https://github.com/\($repo | @uri)/issues\">Tracking issue</a></p>"
+              )
+            }')
+          curl --fail-with-body -sS \
+            --retry 3 --retry-all-errors --retry-delay 2 --retry-max-time 60 \
+            -X POST 'https://api.resend.com/emails' \
             -H "Authorization: Bearer ${RESEND_API_KEY}" \
             -H 'Content-Type: application/json' \
             -d "$payload"
-
-      - name: Report the advisory
-        if: steps.deny.outcome == 'failure'
+      - name: Fail run
+        if: ${{ !cancelled() && steps.deny.outputs.status != '0' }}
         run: exit 1
