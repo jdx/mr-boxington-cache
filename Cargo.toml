@@ -25,7 +25,7 @@ async-trait = "0.1"
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 axum = { version = "0.8", features = ["http2", "json", "macros"] }
-axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", features = ["tls-rustls-no-provider"] }
 base64 = "0.23"
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
