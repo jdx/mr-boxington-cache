@@ -29,7 +29,7 @@ jobs:
         with:
           ref: main
           persist-credentials: false
-      - uses: taiki-e/install-action@51cd0b8c0499559d9a4d75c0f5c67bec3a894ec8 # v2.75.28
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-deny
       # Advisories only -- see the note in deny.toml.
