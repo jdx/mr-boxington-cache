@@ -31,4 +31,12 @@ ignore = [
   # alternative is dropping RSA coverage from the tests. Revisit when
   # RustCrypto/RSA#626 lands a constant-time implementation.
   "RUSTSEC-2023-0071",
+  # chrono is unmaintained, all versions affected, and "No safe upgrade is
+  # available". Transitive via object_store and sqlx-core; revisit when both
+  # move off chrono.
+  "RUSTSEC-2026-0543",
+  # humantime is unmaintained, all versions affected, and "No safe upgrade is
+  # available". Transitive via object_store; revisit when object_store moves
+  # off humantime, independently of chrono.
+  "RUSTSEC-2026-0542",
 ]
