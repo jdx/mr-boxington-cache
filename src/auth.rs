@@ -589,9 +589,8 @@ mod tests {
     };
     use jsonwebtoken::{EncodingKey, Header, encode};
     use rsa::{
-        RsaPrivateKey, RsaPublicKey,
+        Generate, PrivateKey, PublicKey,
         pkcs8::{EncodePrivateKey, LineEnding},
-        rand_core::OsRng,
         traits::PublicKeyParts,
     };
     use std::{
@@ -681,15 +680,15 @@ mod tests {
 
     #[tokio::test]
     async fn validates_oidc_signature_audience_claims_and_permissions() {
-        let private = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
-        let public = RsaPublicKey::from(&private);
+        let private = PrivateKey::generate();
+        let public = PublicKey::from(&private);
         let jwks = Arc::new(RwLock::new(serde_json::json!({"keys":[{
             "kty":"RSA",
             "use":"sig",
             "alg":"RS256",
             "kid":"test-key",
-            "n":URL_SAFE_NO_PAD.encode(public.n().to_bytes_be()),
-            "e":URL_SAFE_NO_PAD.encode(public.e().to_bytes_be())
+            "n":URL_SAFE_NO_PAD.encode(public.n().as_ref().to_be_bytes_trimmed_vartime()),
+            "e":URL_SAFE_NO_PAD.encode(public.e().to_be_bytes_trimmed_vartime())
         }]})));
         let app = Router::new()
             .route(
@@ -773,15 +772,15 @@ mod tests {
                 .is_err()
         );
 
-        let rotated_private = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
-        let rotated_public = RsaPublicKey::from(&rotated_private);
+        let rotated_private = PrivateKey::generate();
+        let rotated_public = PublicKey::from(&rotated_private);
         *jwks.write().await = serde_json::json!({"keys":[{
             "kty":"RSA",
             "use":"sig",
             "alg":"RS256",
             "kid":"rotated-key",
-            "n":URL_SAFE_NO_PAD.encode(rotated_public.n().to_bytes_be()),
-            "e":URL_SAFE_NO_PAD.encode(rotated_public.e().to_bytes_be())
+            "n":URL_SAFE_NO_PAD.encode(rotated_public.n().as_ref().to_be_bytes_trimmed_vartime()),
+            "e":URL_SAFE_NO_PAD.encode(rotated_public.e().to_be_bytes_trimmed_vartime())
         }]});
         let mut rotated_header = Header::new(Algorithm::RS256);
         rotated_header.kid = Some("rotated-key".into());
@@ -804,8 +803,8 @@ mod tests {
             "use":"sig",
             "alg":"RS256",
             "kid":"second-rotation",
-            "n":URL_SAFE_NO_PAD.encode(rotated_public.n().to_bytes_be()),
-            "e":URL_SAFE_NO_PAD.encode(rotated_public.e().to_bytes_be())
+            "n":URL_SAFE_NO_PAD.encode(rotated_public.n().as_ref().to_be_bytes_trimmed_vartime()),
+            "e":URL_SAFE_NO_PAD.encode(rotated_public.e().to_be_bytes_trimmed_vartime())
         }]});
         let mut second_header = Header::new(Algorithm::RS256);
         second_header.kid = Some("second-rotation".into());
