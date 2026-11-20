@@ -32,7 +32,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 hex = "0.4"
 http = "1"
-jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 mbx-cache-protocol = "0.5.2"
 object_store = { version = "0.14.1", default-features = false, features = ["azure", "gcp"] }
 prometheus-client = "0.26"
