@@ -16,14 +16,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
-          version: 2026.11.8
+          version: 2026.11.10
           install: false
           cache: false
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
-          terraform_version: v1.17.1
+          terraform_version: v1.17.2
       - run: terraform -chdir=deploy/azure/terraform fmt -check -recursive
       - run: terraform -chdir=deploy/azure/terraform init -backend=false
       - run: terraform -chdir=deploy/azure/terraform validate
@@ -102,7 +102,7 @@ jobs:
           # The three-dot diff below needs the merge base.
           fetch-depth: 0
           persist-credentials: false
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny
       # Deterministic checks: they only change when this repo does.
@@ -131,9 +131,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
-          version: 2026.11.8
+          version: 2026.11.10
           cache: false
       - run: mise x hk -- hk check --all
         env:
