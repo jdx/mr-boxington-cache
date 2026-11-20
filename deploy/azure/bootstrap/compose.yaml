@@ -27,7 +27,7 @@ services:
     networks: [internal]
 
   caddy:
-    image: caddy:2.11-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    image: caddy:2.11-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
     restart: unless-stopped
     environment:
       MBX_CACHE_DOMAIN: "${MBX_CACHE_DOMAIN:?MBX_CACHE_DOMAIN is required}"
@@ -84,7 +84,7 @@ services:
     networks: [internal]
 
   grafana:
-    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     restart: unless-stopped
     labels:
       dev.mbx-cache.config-hash: "${MBX_CACHE_GRAFANA_CONFIG_HASH:?MBX_CACHE_GRAFANA_CONFIG_HASH is required}"
